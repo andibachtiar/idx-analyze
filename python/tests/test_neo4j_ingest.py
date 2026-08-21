@@ -1,5 +1,9 @@
+import os
 import sys
 from unittest.mock import MagicMock
+
+# Add parent directory to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Mock dependencies that are not installed in the environment
 # This allows us to test the logic in neo4j_ingest.py without having to install all dependencies
@@ -10,7 +14,9 @@ sys.modules["dotenv"] = MagicMock()
 import unittest
 from io import StringIO
 from unittest.mock import patch
+
 import neo4j_ingest
+
 
 class TestNeo4jIngest(unittest.TestCase):
     def test_ingest_all_stock_profiles_file_not_found(self):

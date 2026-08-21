@@ -1,10 +1,11 @@
-import os
-import time
-import json
-import sys
 import asyncio
-from curl_cffi.requests import AsyncSession
+import json
+import os
+import sys
+import time
+
 from curl_cffi import requests
+from curl_cffi.requests import AsyncSession
 
 # Configuration
 BASE_URL = "https://www.idx.co.id/primary"
@@ -14,7 +15,7 @@ COMPANY_DETAIL_ENDPOINT = "/ListedCompany/GetCompanyProfilesDetail"
 # Headers
 headers = {
     "accept": "application/json, text/plain, */*",
-    "Referer": "https://www.idx.co.id/id/perusahaan-tercatat/profil-perusahaan/" 
+    "Referer": "https://www.idx.co.id/id/perusahaan-tercatat/profil-perusahaan/"
 }
 
 # File Paths (relative to the python/ directory)
@@ -37,12 +38,12 @@ async def fetch_data(session, url):
     try:
         # impersonate="chrome" is usually sufficient to bypass basic Cloudflare checks
         response = await session.get(
-            url, 
-            headers=headers, 
+            url,
+            headers=headers,
             impersonate="chrome",
             timeout=30
         )
-        
+
         if response.status_code == 200:
             try:
                 data = response.json()
@@ -53,10 +54,10 @@ async def fetch_data(session, url):
                 print(f"Status: {response.status_code}. Failed to decode JSON. Snippet: {response.text[:500]}")
         else:
             print(f"Status: {response.status_code}. Request failed for {url}. Snippet: {response.text[:500]}")
-            
+
     except Exception as e:
         print(f"An error occurred fetching {url}: {e}")
-        
+
     return None
 
 def fetch_all_company_profiles_sync():
@@ -173,11 +174,11 @@ async def process_companies_async(companies_to_process, kode_emiten_json):
 def scrape_company_data():
     """Orchestrates the scraping, loading, and saving of company data."""
     ensure_data_dir()
-    
+
     # 1. Fetch or load all companies list
     print("--- Step 1: Fetching all company profiles list ---")
     all_companies_data = load_or_initialize_json(ALL_COMPANIES_FILE)
-    
+
     if not all_companies_data or 'data' not in all_companies_data:
         # If file doesn't exist or is empty, fetch it
         all_companies_data = fetch_all_company_profiles_sync()
@@ -195,7 +196,7 @@ def scrape_company_data():
     print("\n--- Step 2: Fetching individual company details ---")
     kode_emiten_json = load_or_initialize_json(COMPANY_DETAILS_FILE)
     companies_to_process = all_companies_data.get('data', [])
-    
+
     print(f"Loaded {len(kode_emiten_json)} existing company details from {os.path.basename(COMPANY_DETAILS_FILE)}")
     print(f"Total companies in list: {len(companies_to_process)}")
 
