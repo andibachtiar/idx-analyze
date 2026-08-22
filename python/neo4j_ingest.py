@@ -1,8 +1,19 @@
 import json
-import re
 import os
-from neo4j import GraphDatabase
+import re
+
+# Fix import shadowing: add site-packages to path BEFORE importing neo4j
+# This ensures we get the installed neo4j package, not a local directory
+import site
+import sys
+
+for p in site.getsitepackages():
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 from dotenv import load_dotenv
+
+from neo4j import GraphDatabase
 
 load_dotenv()  # Load environment variables from .env
 
@@ -14,8 +25,8 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 def clean_indonesian_name(name):
     """
     Cleans a name string by removing common Indonesian titles, degrees, and honorifics.
-    Note: The original notebook function was returning the uncleaned name. This version 
-    includes the cleaning logic but is currently set to return the original name 
+    Note: The original notebook function was returning the uncleaned name. This version
+    includes the cleaning logic but is currently set to return the original name
     to match the notebook's final behavior, or it can be uncommented to clean the name.
     """
     original_name = name
@@ -28,10 +39,10 @@ def clean_indonesian_name(name):
     name_lower = name.lower()
     name_lower = re.sub(r'[^\w\s]', '', name_lower)  # remove punctuation
     tokens = name_lower.split()
-    
+
     # Remove known titles and single-letter fragments (initials)
     tokens = [t for t in tokens if t not in noise_tokens and len(t) > 1]
-    
+
     return original_name
     # return ' '.join(tokens).title()
 
@@ -248,7 +259,7 @@ MERGE (s:TradeDay {
     date: date(split(row.Date, "T")[0]),
     kode: row.StockCode
 })
-SET 
+SET
     s.name = toString(date(split(row.Date, "T")[0])) + "|" + row.StockCode,
     s.idstocksummary=row.IDStockSummary,
     s.stockname=row.StockName,
