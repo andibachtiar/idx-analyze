@@ -1,0 +1,242 @@
+{
+  "banners": {
+    "type": "JToken",
+    "value": [
+      {
+        "id": "1785225458263",
+        "mediaId": "12862",
+        "title1": "Pengumuman",
+        "buttonUrl": "https://www.idx.co.id/id/berita/berita/26fe52bb-bc97-f111-b149-dacbee12ffcb?id=11785",
+        "buttonText": "Selengkapnya",
+        "title2": "RUPSLB BEI, 15 September 2026",
+        "mediaUrl": "https://www.idx.co.id/Media/hqya33zb/idx-identity.png"
+      },
+      {
+        "id": "1786328272212",
+        "mediaId": "20018",
+        "title1": "Selamat HUT Ke-49",
+        "title2": "Pasar Modal Indonesia",
+        "buttonText": "Selengkpanya",
+        "buttonUrl": "https://www.idx.co.id/id/berita/siaran-pers/2675",
+        "mediaUrl": "https://www.idx.co.id/Media/a4shcggs/rolling-banner-hut-pm-3.png"
+      },
+      {
+        "id": "1783937334976",
+        "mediaId": "19887",
+        "title1": "Pemberitahuan Informasi",
+        "title2": "Halaman Data Kepemilikan Saham",
+        "buttonText": "Akses di sini",
+        "buttonUrl": "https://www.idx.co.id/id/perusahaan-tercatat/data-kepemilikan-saham/",
+        "mediaUrl": "https://www.idx.co.id/Media/m4hlzafm/idx-rollban.jpeg"
+      },
+      {
+        "id": "1783912168822",
+        "mediaId": "19884",
+        "title1": "13 Juli 2026",
+        "title2": "HUT ke-34 Bursa Efek Indonesia",
+        "buttonText": "Informasi selengkapnya",
+        "buttonUrl": "https://www.idx.co.id/id/tentang-bei/ikhtisar-dan-sejarah-bei/",
+        "mediaUrl": "https://www.idx.co.id/Media/zwzoh4yp/whatsapp-image-2026-07-13-at-10-08-48.jpeg"
+      },
+      {
+        "id": "1783385968772",
+        "mediaId": "19768",
+        "title1": "Selamat & Sukses",
+        "title2": "Direksi BEI Periode 2026-2030",
+        "buttonText": "Selengkapnya",
+        "buttonUrl": "https://www.idx.co.id/id/tentang-bei/organisasi/",
+        "mediaUrl": "https://www.idx.co.id/Media/g3yc4a4z/rolling-banner-new-direksi-2026-2.png"
+      },
+      {
+        "id": "1782376224882",
+        "mediaId": "19734",
+        "title1": "IDXBell",
+        "title2": "Edisi 43 - Juni 2026",
+        "buttonText": "Selengkapnya",
+        "buttonUrl": "https://www.idx.co.id/id/tentang-bei/idxbell-newsletter/",
+        "mediaUrl": "https://www.idx.co.id/Media/bzvfrgfs/rolling-banner-idxbell.png"
+      },
+      {
+        "id": "1777887908920",
+        "mediaId": "19436",
+        "title1": "Info Reformasi Transparansi Pasar Modal",
+        "title2": "Hubungi hotdesk@idx.co.id",
+        "buttonText": "Selengkapnya",
+        "buttonUrl": "https://www.idx.co.id/id/berita/siaran-pers/2619",
+        "mediaUrl": "https://www.idx.co.id/Media/qdnbgurh/rb-hotdesk.jpeg"
+      },
+      {
+        "id": "1776047487416",
+        "mediaId": "19326",
+        "title1": "Ayo berpartisipasi!",
+        "title2": "Investor Reward Program 2026",
+        "buttonText": "Klik di sini",
+        "buttonUrl": "https://www.idx.co.id/id/investor/investor-reward-program/",
+        "mediaUrl": "https://www.idx.co.id/Media/ya5irtnf/irp.png"
+      },
+      {
+        "id": "1763614704736",
+        "mediaId": "17675",
+        "title1": "Baru!",
+        "title2": "Website IDX Sustainability",
+        "buttonText": "Selengkapnya",
+        "buttonUrl": "https://sustainability.idx.co.id/",
+        "mediaUrl": "https://www.idx.co.id/Media/ynvdsa3b/web-sustainability.jpeg"
+      },
+      {
+        "id": "1758874679179",
+        "mediaId": "8510",
+        "title1": "Laporkan pelanggaran melalui",
+        "title2": "Whistle Blowing System (WBS)",
+        "buttonText": "Lapor di sini",
+        "buttonUrl": "https://id.deloitte-halo.com/idx/?Pg=1&Lang=id-ID",
+        "mediaUrl": "https://www.idx.co.id/Media/e5kirm44/usulan-1.jpg"
+      },
+      {
+        "id": "1704430003431",
+        "mediaId": "10616",
+        "buttonUrl": "https://www.idx.co.id/id/berita/berita/4fb22d6c-345e-f111-b149-dacbee12ffcb?id=11682",
+        "buttonText": "Selengkapnya",
+        "title1": "Imbauan",
+        "title2": "Insan BEI Tidak Menerima Gratifikasi dalam Bentuk Apapun",
+        "mediaUrl": "https://www.idx.co.id/Media/23gkb2io/20240105_himbauan-tak-menerima-hadiah.jpg"
+      },
+      {
+        "id": "1697170874168",
+        "mediaId": "9526",
+        "title1": "Waspada",
+        "title2": "Penipuan yang Mengatasnamakan BEI",
+        "buttonText": "Hubungi Kami",
+        "buttonUrl": "https://www.idx.co.id/id/tentang-bei/hubungi-kami/",
+        "mediaUrl": "https://www.idx.co.id/Media/itwjbz24/20231013_hati2-penipuan.jpg"
+      }
+    ]
+  },
+  "bannerCycleInterval": {
+    "type": "Decimal",
+    "value": 1000.0
+  },
+  "bannerTopLinks": {
+    "type": "JToken",
+    "value": [
+      {
+        "id": "1629300430409",
+        "altText": "IDX Mobile",
+        "url": "https://linktr.ee/indonesiastockexchange",
+        "mediaId": "9297",
+        "mediaUrl": "https://www.idx.co.id/Media/2kdpvkps/idx-mobile-3.png"
+      },
+      {
+        "id": "1629300264630",
+        "altText": "Aku Investor Saham",
+        "url": "https://www.idx.co.id/id/investhub/aku-investor-saham",
+        "mediaId": "9295",
+        "mediaUrl": "https://www.idx.co.id/Media/oxiozl30/ais.png"
+      },
+      {
+        "id": "1629300339890",
+        "url": "https://gopublic.idx.co.id/",
+        "altText": "Go Public",
+        "mediaId": "9298",
+        "mediaUrl": "https://www.idx.co.id/Media/qj3jiona/go-public-2.png"
+      },
+      {
+        "id": "1629300371355",
+        "url": "https://idxislamic.idx.co.id/",
+        "altText": "IDX Islamic",
+        "mediaId": "1652",
+        "mediaUrl": "https://www.idx.co.id/Media/c4qmd4uo/logo-idx-islamic.png"
+      },
+      {
+        "id": "1696924140026",
+        "mediaId": "9478",
+        "url": "https://idxcarbon.co.id/id",
+        "altText": "IDX Carbon",
+        "mediaUrl": "https://www.idx.co.id/Media/4soevy2y/idxcarbon-transparant2.png"
+      },
+      {
+        "id": "1696924194108",
+        "mediaId": "9534",
+        "url": "https://www.aseanexchanges.org/",
+        "altText": "Asean Exchanges",
+        "mediaUrl": "https://www.idx.co.id/Media/ynvpgsfi/asean-new.png"
+      }
+    ]
+  },
+  "bannerBottomLinks": {
+    "type": "JToken",
+    "value": [
+      {
+        "id": "1629300501233",
+        "url": "https://e-ipo.co.id/id/home",
+        "altText": "E-IPO",
+        "mediaId": "6083",
+        "mediaUrl": "https://www.idx.co.id/Media/0opfcvsg/eipo-icon-test.png"
+      },
+      {
+        "id": "1629300524520",
+        "url": "/berita/pengumuman",
+        "altText": "Pengumuman",
+        "mediaId": "6104",
+        "mediaUrl": "https://www.idx.co.id/Media/htrf5opr/pengumuman-icon.png"
+      },
+      {
+        "id": "1629300231227",
+        "url": "/perusahaan-tercatat/laporan-keuangan-dan-tahunan/",
+        "altText": "Laporan Keuangan",
+        "mediaId": "6105",
+        "mediaUrl": "https://www.idx.co.id/Media/stpp1hqt/laporan-keuangan-icon.png"
+      },
+      {
+        "id": "1629300508505",
+        "url": "https://sustainability.idx.co.id/",
+        "altText": "IDX Sustainability",
+        "mediaId": "6106",
+        "mediaUrl": "https://www.idx.co.id/Media/yj1eygjh/esg-icon.png"
+      }
+    ]
+  },
+  "appLinks": {
+    "type": "JToken",
+    "value": [
+      {
+        "id": "1688803579039",
+        "mediaId": "8803",
+        "url": "https://play.google.com/store/apps/details?id=id.co.idx.idxmobile",
+        "altText": "Get it on Google Play",
+        "mediaUrl": "https://www.idx.co.id/Media/gu5ds24h/get_it_on_google_play.png"
+      },
+      {
+        "id": "1688803597573",
+        "mediaId": "8804",
+        "url": "https://apps.apple.com/app/id1658695361",
+        "altText": "Download on the App Store",
+        "mediaUrl": "https://www.idx.co.id/Media/33eijktx/download_on_the_appstore.png"
+      }
+    ]
+  },
+  "showPopup": {
+    "type": "Boolean",
+    "value": true
+  },
+  "popupContent": {
+    "type": "IHtmlString",
+    "value": "<!DOCTYPE html>\n<html>\n<head>\n</head>\n<body>\n<p style=\"text-align: justify;\">Yth. Pengunjung Website BEI,</p>\n<p style=\"text-align: justify;\">Kami informasikan bahwa terdapat kegiatan pengujian Website BEI yang dilaksanakan pada Jumat, 21 Agustus 2026 pukul 18.00 WIB sampai dengan Sabtu, 22 Agustus 2026 pukul 18.00 WIB. Halaman yang akan diuji adalah: </p>\n<ol style=\"text-align: justify;\">\n<li>Beranda</li>\n<li>Data Pasar &gt; Data Saham &gt; Daftar Saham</li>\n<li>Data Pasar &gt; Data Structured Warrant (SW)</li>\n<li>Data Pasar &gt; DIRE &amp; DINFRA</li>\n<li>Data Pasar &gt; Data Exchanged Traded Fund (ETF)</li>\n<li>Perusahaan Tercatat &gt; Aktivitas Pencatatan</li>\n<li>Perusahaan Tercatat &gt; Aksi Korporasi</li>\n<li>Perusahaan Tercatat &gt; Profil Perusahaan Tercatat</li>\n<li>Perusahaan Tercatat &gt; Daftar Efek Pemantauan Khusus</li>\n<li>Perusahaan Tercatat &gt; Laporan Keuangan dan Tahunan</li>\n<li>Perusahaan Tercatat &gt; Keterbukaan Informasi</li>\n<li>Perusahaan Tercatat &gt; Kalender Perusahaan Tercatat</li>\n<li>Perusahaan Tercatat &gt; Notasi Khusus</li>\n<li>Berita &gt; Pengumuman</li>\n<li>Berita &gt; Suspensi</li>\n<li>Investor &gt; Stock Screener</li>\n</ol>\n<p style=\"text-align: justify;\">Selama kegiatan, halaman Website BEI tersebut akan menampilkan data dan informasi pengujian. BEI tidak bertanggung jawab atas penggunaan/pengambilan data pengujian dalam periode waktu tersebut. </p>\n<p style=\"text-align: justify;\">Mohon maaf atas ketidaknyamanannya. Terima kasih.  </p>\n<p>Salam,  <br />PT Bursa Efek Indonesia </p>\n</body>\n</html>"
+  },
+  "popupExpiry": {
+    "type": "DateTime",
+    "value": "2026-08-22T18:00:00Z"
+  },
+  "enableLiveChat": {
+    "type": "Boolean",
+    "value": true
+  },
+  "enableCustomerFeedback": {
+    "type": "Boolean",
+    "value": false
+  },
+  "description": {
+    "type": "String",
+    "value": ""
+  }
+}
