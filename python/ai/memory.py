@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -39,6 +40,8 @@ class ResearchMemory:
             )
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
+        # Use perf_counter for high-resolution unique identifier
+        self._save_offset = time.perf_counter()
 
     def save_report(
         self,
@@ -60,9 +63,12 @@ class ResearchMemory:
             File path where report was saved
         """
         ticker_upper = ticker.upper()
-        # Use microseconds to prevent overwrites when saving rapidly
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-        filename = f"{ticker_upper}_{timestamp}.json"
+        # Use high-resolution time-based unique identifier to prevent overwrites
+        # Combine date timestamp with fractional seconds for uniqueness
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Add fractional seconds for uniqueness within the same second
+        fractional = int((time.perf_counter() % 1) * 1000000)
+        filename = f"{ticker_upper}_{timestamp}_{fractional:06d}.json"
         filepath = self.storage_path / filename
 
         # Convert report to dict if needed

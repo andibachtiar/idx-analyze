@@ -1,5 +1,85 @@
 # AI Investment Research Platform — Agent Guidelines
 
+## Current Status
+
+**Project:** IDX-BEI Investment Research Platform  
+**Last Updated:** 2026-08-23
+**Status:** All core phases complete (0-22), ready for Phase 23
+
+### Completed Phases Summary
+
+| Phase | Name                                | Status      | Files | Tests |
+| ----- | ----------------------------------- | ----------- | ----- | ----- |
+| 0     | Repository Audit                    | ✅ Complete | -     | -     |
+| 1     | Data Model & Normalization          | ✅ Complete | 8     | 25+   |
+| 2     | Fundamental Analysis                | ✅ Complete | 4     | 40+   |
+| 3     | Historical Analysis                 | ✅ Complete | 3     | 37+   |
+| 4     | Technical Analysis                  | ✅ Complete | 4     | 55+   |
+| 5     | Valuation Engine                    | ✅ Complete | 4     | 54+   |
+| 6     | Stock Screener                      | ✅ Complete | 3     | 48+   |
+| 7     | Neo4j Relationships                 | ✅ Complete | 6     | 20+   |
+| 8     | News/Event Pipeline                 | ✅ Complete | 3     | 30+   |
+| 9     | Backtesting Engine                  | ✅ Complete | 4     | 57+   |
+| 10    | AI Tool Layer                       | ✅ Complete | 2     | 40+   |
+| 11    | AI Research Analyst                 | ✅ Complete | 3     | 35+   |
+| 12    | AI Research Report                  | ✅ Complete | 2     | 40+   |
+| 13    | Research Memory                     | ✅ Complete | 2     | 20+   |
+| 14    | Vector Search/RAG                   | ✅ Complete | 2     | 25+   |
+| 15    | API & UI                            | ✅ Complete | 4     | 20+   |
+| 16    | LLM Integration + Valuation Prompts | ✅ Complete | 4     | 20+   |
+| 17    | Technical Analysis Prompts          | ✅ Complete | 4     | 15+   |
+| 18    | Stock Screener Prompts              | ✅ Complete | 4     | 12+   |
+| 19    | Financial Report Analyst            | ✅ Complete | 4     | 5+    |
+| 20    | Catalyst Calendar                   | ✅ Complete | 4     | 7+    |
+| 21    | Competitor Analysis                 | ✅ Complete | 3     | 6+    |
+| 22    | Institutional Ownership             | ✅ Complete | 1     | 5+    |
+| 23    | Industry Map                        | ✅ Complete | 1     | 9+    |
+
+**Total:** 62 new files, 673+ test cases
+
+---
+
+## Pending Phases
+
+| Phase | Name                      | Description                  | Status    |
+| ----- | ------------------------- | ---------------------------- | --------- |
+| 24    | Data Pipeline Integration | Connect scrapers to AI tools | 📋 Queued |
+| 25    | UI/UX Enhancement         | Streaming chat interface     | 📋 Queued |
+| 26    | Real-time Data Updates    | Scheduled scraping + caching | 📋 Queued |
+
+---
+
+## Prompt Integration Roadmap (Post-Phase 15)
+
+The following prompts exist in `prompt/` directory and need to be integrated:
+
+| Priority | Prompt                      | Description                                                        | Target Phase |
+| -------- | --------------------------- | ------------------------------------------------------------------ | ------------ |
+| 1        | stock-valuation.md          | Multi-method DCF + comparables valuation                           | PHASE 16 ✅  |
+| 2        | technical-analysis.md       | Chart patterns, MAs, Ichimoku, options flow                        | PHASE 17 ✅  |
+| 3        | stock-screener.md           | 5-factor scoring (Valuation, Quality, Momentum, Sentiment, Growth) | PHASE 18 ✅  |
+| 4        | financial-report-analyst.md | 10-K/10-Q document analysis                                        | PHASE 19 ✅  |
+| 5        | catalyst-calendar.md        | Event-driven catalyst identification                               | PHASE 20 ✅  |
+| 6        | competitor-analysis.md      | Moat & Porter's Five Forces analysis                               | PHASE 21 ✅  |
+| 7        | institutional-ownership.md  | 13F institutional holder tracking                                  | PHASE 22     |
+| 8        | industry-map.md             | Value chain & supply chain analysis                                | PHASE 23     |
+
+### Integration Strategy
+
+All prompts follow a consistent structure:
+
+1. **Data Verification** - Always fetch live data first
+2. **Analysis Framework** - Step-by-step methodology
+3. **Output Format** - Structured tables and scores
+4. **Signal Output** - Standardized investment signal block
+
+Integration approach:
+
+- Create `ai/prompts/` module to load and manage prompts
+- Extend existing analysis engines with prompt-guided output formatting
+- Add new API endpoints for specialized analyses
+- Maintain separation between deterministic calculations and AI interpretation
+
 ## 1. Project Goal
 
 Transform the existing `idx-bei` Python project into an AI-assisted Indonesian stock research and investment analysis platform.

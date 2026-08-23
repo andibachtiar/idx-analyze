@@ -195,11 +195,20 @@ class FinancialMetrics:
     net_margin: FinancialValue = None  # npm
     roe: FinancialValue = None
     roa: FinancialValue = None
+    roic: FinancialValue = None  # Return on Invested Capital
     debt_to_equity: FinancialValue = None  # de_ratio
     current_ratio: FinancialValue = None
     pe_ratio: FinancialValue = None  # per
     pb_ratio: FinancialValue = None  # price_bv
     ev_ebitda: FinancialValue = None
+
+    # Growth rates (CAGR)
+    revenue_cagr_3y: FinancialValue = None
+    revenue_cagr_5y: FinancialValue = None
+    earnings_cagr_3y: FinancialValue = None
+    earnings_cagr_5y: FinancialValue = None
+    eps_cagr_3y: FinancialValue = None
+    eps_cagr_5y: FinancialValue = None
 
     # Metadata
     period_id: Optional[int] = None
@@ -216,8 +225,11 @@ class FinancialMetrics:
             'total_debt', 'total_equity', 'book_value_per_share',
             'operating_cash_flow', 'capital_expenditures', 'free_cash_flow',
             'shares_outstanding', 'dividend_per_share',
-            'gross_margin', 'operating_margin', 'net_margin', 'roe', 'roa',
-            'debt_to_equity', 'current_ratio', 'pe_ratio', 'pb_ratio', 'ev_ebitda'
+            'gross_margin', 'operating_margin', 'net_margin', 'roe', 'roa', 'roic',
+            'debt_to_equity', 'current_ratio', 'pe_ratio', 'pb_ratio', 'ev_ebitda',
+            'revenue_cagr_3y', 'revenue_cagr_5y',
+            'earnings_cagr_3y', 'earnings_cagr_5y',
+            'eps_cagr_3y', 'eps_cagr_5y'
         ]
         return all(getattr(self, attr) is None for attr in data_attrs)
 

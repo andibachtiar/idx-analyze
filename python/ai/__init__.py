@@ -5,11 +5,11 @@ Provides AI-powered investment research using deterministic data engines
 with structured report generation.
 """
 
-# Researcher
-# Enhanced report classes (Phase 12)
-from .enhanced_report import (
-    ReportGenerator,
-    generate_report,
+# LLM Integration (Phase 16+)
+from .llm import (
+    LLMClient,
+    analyze_text,
+    create_llm_client,
 )
 
 # Research Memory (Phase 13)
@@ -18,6 +18,27 @@ from .memory import (
     compare_research_theses,
     get_research_history,
     save_research_report,
+)
+
+# Technical Analysis Prompts (Phase 17)
+from .prompts.technical import (
+    BollingerBandResult,
+    IchimokuResult,
+    MACDResult,
+    MovingAverageSignal,
+    TechnicalAnalysisResult,
+    analyze_stock_technicals,
+    generate_technical_prompt,
+    get_technical_analysis_with_llm,
+)
+
+# Valuation Prompts (Phase 16+)
+from .prompts.valuation import (
+    ValuationResult,
+    WACCCalculation,
+    analyze_stock_valuation,
+    calculate_wacc,
+    generate_valuation_prompt,
 )
 
 # Report classes
@@ -57,24 +78,35 @@ from .tools import (
     compare_stocks as tools_compare_stocks,
 )
 
-# Vector Search (Phase 14)
-from .vector import (
-    DocumentProcessor,
-    VectorStore,
-    create_vector_store,
-    search_documents,
-)
-
 __all__ = [
+    # LLM
+    "LLMClient",
+    "create_llm_client",
+    "analyze_text",
+    # Valuation Prompts
+    "WACCCalculation",
+    "ValuationResult",
+    "calculate_wacc",
+    "analyze_stock_valuation",
+    "generate_valuation_prompt",
+    # Technical Analysis Prompts
+    "TechnicalAnalysisResult",
+    "MACDResult",
+    "BollingerBandResult",
+    "MovingAverageSignal",
+    "IchimokuResult",
+    "analyze_stock_technicals",
+    "generate_technical_prompt",
+    "get_technical_analysis_with_llm",
     # Researcher
     "AIResearcher",
     "analyze_stock",
     "compare_stocks",
     "create_researcher",
-    # Report (Phase 11)
+    # Report
     "ClaimTracker",
     "ResearchReport",
-    # Enhanced Report (Phase 12)
+    # Enhanced Report
     "ReportGenerator",
     "generate_report",
     "Claim",
@@ -82,6 +114,11 @@ __all__ = [
     "InvestmentReport",
     "ReportSection",
     "create_standard_report",
+    # Memory
+    "ResearchMemory",
+    "save_research_report",
+    "get_research_history",
+    "compare_research_theses",
     # Tools
     "get_stock_price",
     "get_financials",
@@ -97,9 +134,4 @@ __all__ = [
     "get_stock_profile",
     "batch_screen",
     "batch_compare",
-    # Vector Search (Phase 14)
-    "VectorStore",
-    "DocumentProcessor",
-    "create_vector_store",
-    "search_documents",
 ]

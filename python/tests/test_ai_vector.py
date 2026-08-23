@@ -280,10 +280,15 @@ class TestDocumentProcessor:
         text = "A B C D E F G H I J K L M N O P"
         chunks = DocumentProcessor.chunk_text(text, chunk_size=10, overlap=5)
 
-        assert len(chunks) >= 2
-        # Check overlap
+        assert len(chunks) >= 2, f"Expected at least 2 chunks, got {len(chunks)}"
+        # Check overlap - second chunk should start before first ends
         if len(chunks) > 1:
-            assert chunks[0]["end"] > chunks[1]["start"]
+            # The overlap means chunk2 starts 'overlap' chars before chunk1 ends
+            expected_start = chunks[0]["end"] - 5  # overlap=5
+            assert chunks[1]["start"] == expected_start, \
+                f"Expected overlap: chunk1 end={chunks[0]['end']}, chunk2 start={chunks[1]['start']}, expected={expected_start}"
+            assert chunks[0]["end"] > chunks[1]["start"], \
+                f"No overlap: chunk1 ends at {chunks[0]['end']}, chunk2 starts at {chunks[1]['start']}"
 
     def test_chunk_text_small_chunks(self):
         """Test chunking with small chunk size."""

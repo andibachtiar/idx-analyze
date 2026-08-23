@@ -58,6 +58,75 @@ class ThesisValidationRequest(BaseModel):
     thesis: str = Field(..., description="Investment thesis to validate")
 
 
+class ValuationAnalysisRequest(BaseModel):
+    """Request for AI-powered valuation analysis."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    current_price: float = Field(..., description="Current stock price")
+    use_llm: bool = Field(True, description="Use LLM for interpretation")
+    peer_pe_median: float = Field(15.0, description="Peer median P/E ratio")
+
+
+class TechnicalAnalysisRequest(BaseModel):
+    """Request for AI-powered technical analysis."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    prices: List[float] = Field(..., description="List of closing prices (most recent last)")
+    volumes: Optional[List[int]] = Field(None, description="List of trading volumes")
+    highs: Optional[List[float]] = Field(None, description="List of high prices")
+    lows: Optional[List[float]] = Field(None, description="List of low prices")
+    use_llm: bool = Field(True, description="Use LLM for enhanced interpretation")
+
+
+class ScreenerRequest(BaseModel):
+    """Request for AI-powered stock screening."""
+    tickers: List[str] = Field(..., description="List of ticker symbols to screen")
+    filters: Optional[Dict[str, Any]] = Field(None, description="Optional screening filters")
+    use_llm: bool = Field(True, description="Use LLM for enhanced interpretation")
+
+
+class FinancialReportRequest(BaseModel):
+    """Request for AI-powered financial report analysis."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    filing_type: str = Field("10-K", description="Filing type (10-K, 10-Q, etc.)")
+    revenue: float = Field(..., description="Total revenue")
+    net_income: float = Field(..., description="Net income")
+    gross_margin: float = Field(..., description="Gross margin percentage")
+    operating_margin: float = Field(..., description="Operating margin percentage")
+    fcf: float = Field(..., description="Free cash flow")
+    total_debt: float = Field(..., description="Total debt")
+    cash: float = Field(0.0, description="Cash and equivalents")
+    auditor_opinion: str = Field("unqualified", description="Auditor opinion")
+
+
+class CatalystRequest(BaseModel):
+    """Request for AI-powered catalyst calendar analysis."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    days: int = Field(90, description="Look-ahead window in days")
+    focus: str = Field("all", description="Filter by category: earnings, macro, corporate, all")
+
+
+class CompetitorRequest(BaseModel):
+    """Request for AI-powered competitor analysis."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    moat_width: str = Field("Narrow", description="Moat width: Wide, Narrow, None, At Risk")
+    moat_score: float = Field(5.0, description="Moat score (0-10)")
+    market_share: float = Field(0.0, description="Current market share percentage")
+
+
+class InstitutionalOwnershipRequest(BaseModel):
+    """Request for AI-powered institutional ownership analysis."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    institutional_ownership_pct: float = Field(70.0, description="Percentage of shares held by institutions")
+    num_holders: int = Field(500, description="Number of institutional holders")
+    top10_concentration: float = Field(40.0, description="Percentage held by top 10 holders")
+
+
+class IndustryMapRequest(BaseModel):
+    """Request for AI-powered industry map analysis."""
+    ticker: Optional[str] = Field(None, description="Stock ticker symbol (optional)")
+    theme: str = Field(..., description="Theme or product to map (e.g., 'AI compute', 'electric vehicles')")
+    focus_layer: Optional[str] = Field(None, description="Optional layer to focus on")
+
+
 # =============================================================================
 # RESPONSE SCHEMAS
 # =============================================================================

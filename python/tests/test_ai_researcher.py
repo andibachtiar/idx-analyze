@@ -79,8 +79,9 @@ def sample_metrics():
 class TestResearcherInit:
     """Tests for AIResearcher initialization."""
 
-    def test_create_researcher_without_api_key(self):
+    def test_create_researcher_without_api_key(self, monkeypatch):
         """Test creating researcher without API key (uses mock)."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         researcher = AIResearcher(api_key=None)
         assert researcher.model == "gpt-4o"
         assert researcher.client is None

@@ -17,6 +17,11 @@ import json
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Union
 
+# Import data loader
+from ai.data_loader import get_data_loader
+
+# Import data registry for LLM access
+from ai.llm_config import get_data_registry
 from analysis.fundamental import (
     calculate_all_metrics,
     current_ratio,
@@ -134,13 +139,29 @@ def get_stock_price(ticker: str, source: str = "yfinance") -> Dict[str, Any]:
     Returns:
         Dictionary with price information
     """
+    from ai.data_loader import get_data_loader
+    loader = get_data_loader()
+    price_data = loader.get_stock_price(ticker)
+
+    if price_data:
+        return {
+            "ticker": ticker.upper(),
+            "price": price_data.get("price"),
+            "currency": "IDR",
+            "source": source,
+            "as_of": price_data.get("as_of", str(date.today())),
+            "change": price_data.get("change"),
+            "change_pct": price_data.get("change_pct"),
+            "volume": price_data.get("volume"),
+        }
+
     return {
         "ticker": ticker.upper(),
         "price": None,
         "currency": "IDR",
         "source": source,
         "as_of": str(date.today()),
-        "notes": "Price data not yet implemented - requires market data integration"
+        "notes": "Price data not available - no scraped data found for this ticker"
     }
 
 
@@ -160,6 +181,20 @@ def get_financials(
     Returns:
         Dictionary with financial metrics
     """
+    from ai.data_loader import get_data_loader
+    loader = get_data_loader()
+    ratios = loader.get_financial_ratios(ticker)
+
+    if ratios:
+        return {
+            "ticker": ticker.upper(),
+            "period": period,
+            "period_type": period_type,
+            "metrics": ratios,
+            "source": "idx_scraped_data",
+            "as_of": str(date.today()),
+        }
+
     return {
         "ticker": ticker.upper(),
         "period": period,
@@ -167,7 +202,7 @@ def get_financials(
         "metrics": None,
         "source": "database",
         "as_of": str(date.today()),
-        "notes": "Financial data not yet implemented - requires database integration"
+        "notes": "No financial data found for this ticker in scraped data"
     }
 
 
@@ -182,6 +217,40 @@ def get_fundamental_analysis(ticker: str, metrics: Optional[FinancialMetrics] = 
     Returns:
         Dictionary with fundamental analysis results
     """
+    from ai.data_loader import get_data_loader
+
+    # If no metrics provided, try to load from data loader
+    if metrics is None:
+        loader = get_data_loader()
+        ratios = loader.get_financial_ratios(ticker)
+
+        if ratios:
+            # Convert financial ratios to FinancialMetrics format
+            metrics = FinancialMetrics(
+                revenue=_safe_float(ratios.get('sales')),
+                cost_of_goods_sold=_safe_float(ratios.get('cogs')) or (_safe_float(ratios.get('sales')) and _safe_float(ratios.get('gross_profit'))) and _safe_float(ratios.get('sales')) - _safe_float(ratios.get('gross_profit')) or None,
+                gross_profit=_safe_float(ratios.get('gross_profit')),
+                operating_income=_safe_float(ratios.get('ebt')),
+                net_income=_safe_float(ratios.get('profitAttrOwner')) or _safe_float(ratios.get('profitPeriod')),
+                eps=_safe_float(ratios.get('eps')),
+                total_assets=_safe_float(ratios.get('assets')),
+                total_liabilities=_safe_float(ratios.get('liabilities')),
+                total_equity=_safe_float(ratios.get('equity')),
+                roe=_safe_float(ratios.get('roe')) and _safe_float(ratios.get('roe')) / 100,
+                roa=_safe_float(ratios.get('roa')) and _safe_float(ratios.get('roa')) / 100,
+                debt_to_equity=_safe_float(ratios.get('deRatio')),
+            )
+        else:
+            return {
+                "ticker": ticker.upper(),
+                "calculated_at": str(datetime.now()),
+                "growth": {},
+                "profitability": {},
+                "financial_health": {},
+                "cash_flow": {},
+                "notes": "No financial data found for this ticker in scraped data"
+            }
+
     result = {
         "ticker": ticker.upper(),
         "calculated_at": str(datetime.now()),
@@ -256,6 +325,22 @@ def get_technical_analysis(
     Returns:
         Dictionary with technical analysis results
     """
+    from ai.data_loader import get_data_loader
+
+    # Try to get price data from loader if not provided
+    if prices is None:
+        loader = get_data_loader()
+        price_data = loader.get_stock_price(ticker)
+        if price_data and price_data.get("price"):
+            # Use current price with a note that we don't have historical data
+            return {
+                "ticker": ticker.upper(),
+                "calculated_at": str(datetime.now()),
+                "indicators": {},
+                "signals": {},
+                "notes": "Historical price data not available for technical indicators. Only current price known: " + str(price_data.get("price")),
+            }
+
     result = {
         "ticker": ticker.upper(),
         "calculated_at": str(datetime.now()),
@@ -264,7 +349,7 @@ def get_technical_analysis(
     }
 
     if prices is None or len(prices) < 20:
-        result["notes"] = "Insufficient price data for technical analysis"
+        result["notes"] = "Insufficient price data for technical analysis. Provide historical prices or ensure data is scraped."
         return result
 
     # Get technical summary
@@ -327,11 +412,40 @@ def get_valuation(
     Returns:
         Dictionary with valuation results
     """
+    from ai.data_loader import get_data_loader
+
+    # Try to get price and metrics from data loader if not provided
+    loader = get_data_loader()
+
+    if price is None:
+        price_data = loader.get_stock_price(ticker)
+        if price_data:
+            price = price_data.get("price")
+
+    if metrics is None:
+        ratios = loader.get_financial_ratios(ticker)
+        if ratios:
+            # Convert ratios to FinancialMetrics format
+            metrics = FinancialMetrics(
+                revenue=_safe_float(ratios.get('sales')),
+                net_income=_safe_float(ratios.get('profitAttrOwner')) or _safe_float(ratios.get('profitPeriod')),
+                total_assets=_safe_float(ratios.get('assets')),
+                total_liabilities=_safe_float(ratios.get('liabilities')),
+                total_equity=_safe_float(ratios.get('equity')),
+                eps=_safe_float(ratios.get('eps')),
+                pe_ratio=_safe_float(ratios.get('per')),
+                pb_ratio=_safe_float(ratios.get('priceBV')),
+                debt_to_equity=_safe_float(ratios.get('deRatio')),
+                roe=_safe_float(ratios.get('roe')) and _safe_float(ratios.get('roe')) / 100,
+                roa=_safe_float(ratios.get('roa')) and _safe_float(ratios.get('roa')) / 100,
+                net_margin=_safe_float(ratios.get('npm')) and _safe_float(ratios.get('npm')) / 100,
+            )
+
     if price is None or metrics is None:
         return {
             "ticker": ticker.upper(),
             "valuations": {},
-            "notes": "Price and financial metrics required for valuation"
+            "notes": "Price and/or financial metrics not available. Ensure data is scraped first."
         }
 
     # Convert tuples to lists for JSON serialization
@@ -366,6 +480,8 @@ def get_historical_analysis(
     Returns:
         Dictionary with historical analysis (growth rates, trends)
     """
+    from ai.data_loader import get_data_loader
+
     result = {
         "ticker": ticker.upper(),
         "calculated_at": str(datetime.now()),
@@ -373,8 +489,13 @@ def get_historical_analysis(
         "trends": {},
     }
 
+    # Try to get data from loader
+    loader = get_data_loader()
+
+    # Check if we have historical data
     if raw_data is None or len(raw_data) < 2:
-        result["notes"] = "Insufficient historical data for analysis"
+        # Note: Historical data not currently scraped, only current ratios available
+        result["notes"] = "Historical financial data not available. Only current period ratios are available from scraped data."
         return result
 
     # Analyze growth
@@ -391,6 +512,40 @@ def get_historical_analysis(
     return _format_structured_result(result)
 
 
+def get_company_info(ticker: str) -> Dict[str, Any]:
+    """
+    Get company information for a ticker.
+
+    Args:
+        ticker: Stock ticker symbol
+
+    Returns:
+        Dictionary with company information
+    """
+    from ai.data_loader import get_data_loader
+    loader = get_data_loader()
+    info = loader.get_company_info(ticker)
+
+    if info:
+        return {
+            "ticker": info.get("ticker", ticker.upper()),
+            "name": info.get("name", ""),
+            "sector": info.get("sector", ""),
+            "industry": info.get("industry", ""),
+            "listing_date": info.get("listing_date", ""),
+            "board": info.get("board", ""),
+            "source": "idx_scraped_data",
+        }
+
+    return {
+        "ticker": ticker.upper(),
+        "name": "",
+        "sector": "",
+        "industry": "",
+        "notes": "Company information not found in scraped data"
+    }
+
+
 def get_company_news(
     ticker: str,
     limit: int = 10
@@ -405,12 +560,15 @@ def get_company_news(
     Returns:
         Dictionary with news articles
     """
+    from ai.data_loader import get_data_loader
+    loader = get_data_loader()
+    news = loader.get_news(ticker, limit)
+
     return {
         "ticker": ticker.upper(),
-        "news": [],
-        "count": 0,
+        "news": news,
+        "count": len(news),
         "limit": limit,
-        "notes": "News integration not yet implemented"
     }
 
 

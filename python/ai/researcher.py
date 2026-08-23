@@ -19,7 +19,25 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Load environment variables from .env file
+# Check multiple possible locations
+_env_paths = [
+    Path(__file__).parent.parent / ".env",  # python/.env
+    Path(__file__).parent.parent.parent / ".env",  # root/.env
+    Path.cwd() / ".env",  # current working directory/.env
+]
+
+for _env_path in _env_paths:
+    if _env_path.exists():
+        from dotenv import load_dotenv
+        load_dotenv(_env_path)
+        print(f"Loaded environment from: {_env_path}")
+        break
+else:
+    print("WARNING: No .env file found. Using default values.")
 
 try:
     from openai import OpenAI
@@ -34,6 +52,8 @@ from ai.prompts import (
 )
 from ai.report import ClaimTracker, ResearchReport
 from ai.tools import (
+    get_company_info,
+    get_company_news,
     get_fundamental_analysis,
     get_historical_analysis,
     get_stock_price,
@@ -62,12 +82,19 @@ class AIResearcher:
 
         Args:
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
-            model: LLM model to use
-            base_url: Optional custom API base URL
+            model: LLM model to use (defaults to OPENAI_MODEL env var)
+            base_url: Optional custom API base URL (defaults to OPENAI_BASE_URL env var)
         """
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        self.model = model
-        self.base_url = base_url
+        # Get config from environment or parameters
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.model = model if model != "gpt-4o" else os.environ.get("OPENAI_MODEL", "gpt-4o")
+        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+        # Debug: print config status (only in development)
+        if not self.api_key:
+            print("WARNING: No OpenAI API key found. Set OPENAI_API_KEY env var or pass api_key parameter.")
+            print(f"  Current model: {self.model}")
+            print(f"  Current base_url: {self.base_url}")
 
         self._client = None
         if OpenAI is None:
@@ -75,7 +102,14 @@ class AIResearcher:
                 "OpenAI package not installed. Run: pip install openai"
             )
         if self.api_key:
-            self._client = OpenAI(api_key=self.api_key, base_url=base_url)
+            try:
+                self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                print(f"OpenAI client initialized with model: {self.model}")
+            except Exception as e:
+                print(f"Failed to initialize OpenAI client: {e}")
+                self._client = None
+        else:
+            print("No API key configured - using mock responses")
 
     @property
     def client(self):
@@ -89,6 +123,9 @@ class AIResearcher:
         valuation_data: Dict[str, Any],
         technical_data: Dict[str, Any],
         historical_data: Dict[str, Any],
+        company_info: Optional[Dict[str, Any]] = None,
+        news_data: Optional[Dict[str, Any]] = None,
+        price_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Prepare data context for LLM analysis.
@@ -96,6 +133,16 @@ class AIResearcher:
         Converts tool results to a structured text format for the LLM.
         """
         context_parts = [f"## Stock: {ticker}"]
+
+        # Add company info
+        if company_info:
+            context_parts.append("\n### Company Information")
+            context_parts.append(json.dumps(company_info, indent=2, default=str))
+
+        # Add price data
+        if price_data and price_data.get("price"):
+            context_parts.append("\n### Price Data")
+            context_parts.append(json.dumps(price_data, indent=2, default=str))
 
         # Add fundamental data
         if fundamental_data:
@@ -111,6 +158,11 @@ class AIResearcher:
         if technical_data:
             context_parts.append("\n### Technical Analysis")
             context_parts.append(json.dumps(technical_data, indent=2, default=str))
+
+        # Add news data
+        if news_data and news_data.get("news"):
+            context_parts.append("\n### Recent News")
+            context_parts.append(json.dumps(news_data, indent=2, default=str))
 
         # Add historical data
         if historical_data:
@@ -198,19 +250,24 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         fundamental_data = get_fundamental_analysis(ticker)
         valuation_data = get_valuation(ticker)
         technical_data = get_technical_analysis(ticker)
+        company_info = get_company_info(ticker)
+        news_data = get_company_news(ticker, limit=5)
 
         historical_data = {}
         if include_history:
             # Note: Would need raw historical data for full analysis
             historical_data = {"note": "Historical data not available in mock mode"}
 
-        # Prepare data context
+        # Prepare data context with all available information
         data_context = self._prepare_data_context(
             ticker=ticker,
             fundamental_data=fundamental_data,
             valuation_data=valuation_data,
             technical_data=technical_data,
             historical_data=historical_data,
+            company_info=company_info,
+            news_data=news_data,
+            price_data=price_data,
         )
 
         # Build prompt

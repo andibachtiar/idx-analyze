@@ -1,2 +1,5 @@
 *.html
 *.json
+.env
+.env.local
+.env.*.local

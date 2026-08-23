@@ -97,7 +97,8 @@ class VectorStore:
             return response.data[0].embedding
         except Exception as e:
             print(f"Embedding generation failed: {e}")
-            return None
+            # Fall back to simple embedding on failure
+            return self._simple_embedding(text)
 
     def _simple_embedding(self, text: str, dimension: int = 128) -> List[float]:
         """
