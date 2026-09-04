@@ -7,6 +7,8 @@ import time
 from curl_cffi import requests
 from curl_cffi.requests import AsyncSession
 
+from database.scraper_store import ScraperDatabase, save_raw_json
+
 # Configuration
 BASE_URL = "https://www.idx.co.id/primary"
 COMPANY_PROFILES_ENDPOINT = "/ListedCompany/GetCompanyProfiles"
@@ -107,13 +109,10 @@ def load_or_initialize_json(file_path, default_value=None):
     return default_value
 
 def save_json(file_path, data):
-    """Saves data to a JSON file."""
-    try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        print(f"Successfully saved data to {os.path.basename(file_path)}")
-    except IOError as e:
-        print(f"Error saving data to {file_path}: {e}")
+    """Persist raw response only when SCRAPER_SAVE_JSON=true."""
+    save_raw_json(file_path, data)
+    if os.getenv("SCRAPER_SAVE_JSON", "false").lower() == "true":
+        print(f"Raw data saved to {file_path}")
 
 async def process_company(session, semaphore, company, index, total, kode_emiten_json):
     kode_emiten = company.get('KodeEmiten')
@@ -190,6 +189,16 @@ def scrape_company_data():
         save_json(ALL_COMPANIES_FILE, all_companies_data)
     else:
         print(f"Loaded {all_companies_data.get('recordsTotal', len(all_companies_data['data']))} existing company records from {os.path.basename(ALL_COMPANIES_FILE)}")
+
+    # Persist the company master list before details so foreign-key references
+    # from financial and price scrapers are available immediately.
+    try:
+        with ScraperDatabase() as store:
+            imported = store.upsert_companies(all_companies_data.get('data', []))
+        print(f"Persisted {imported} company records to PostgreSQL")
+    except Exception as exc:
+        print(f"PostgreSQL persistence failed: {exc}")
+        raise
 
 
     # 2. Fetch company details incrementally

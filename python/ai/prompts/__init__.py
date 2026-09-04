@@ -53,7 +53,6 @@ When data is unavailable, clearly state:
 - "Price data not available"
 
 Always cite your data sources and timestamps."""
-"""
 
 # Prompt for initial stock analysis
 INITIAL_ANALYSIS_PROMPT = """Analyze the stock {ticker} based on the following question:

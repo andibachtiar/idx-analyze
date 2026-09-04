@@ -21,10 +21,40 @@ uv run scrape_financial_ratio.py
 uv run scrape_broker_search.py
 uv run scrape_idx_news.py
 uv run scrape_index_summary.py
+uv run scrape_stock_prices.py
 
 # All scrapers in sequence
 uv run scrape_company_profiles.py && uv run scrape_financial_ratio.py && uv run scrape_broker_search.py && uv run scrape_idx_news.py && uv run scrape_index_summary.py
 ```
+
+### Scrape Stock Prices (daily OHLCV → PostgreSQL)
+
+The price scraper persists daily OHLCV data into the `stock_prices` table
+(idempotent upsert keyed by `ticker + trading_date`):
+
+```bash
+# Daily mode (default): fetch only dates missing from PostgreSQL.
+# Scrapes ALL tickers from the companies table (the IDX universe);
+# falls back to a sample list only when that table is empty.
+uv run scrape_stock_prices.py
+
+# Single stock, incremental (only missing dates)
+uv run scrape_stock_prices.py --ticker BBCA
+
+# Explicit date range
+uv run scrape_stock_prices.py --ticker BBCA --start 2025-01-01 --end 2025-12-31
+
+# Multiple tickers
+uv run scrape_stock_prices.py --ticker BBCA --ticker TLKM --backfill
+
+# ~5 years of history regardless of what is stored
+uv run scrape_stock_prices.py --backfill
+```
+
+Tickers that are missing from the `companies` table are auto-created as
+placeholder rows during price ingestion (existing company details are never
+overwritten). Run `scrape_company_profiles.py` first to populate the full
+IDX universe with proper names/sectors.
 
 ## 📁 Scraper Scripts
 
@@ -35,6 +65,7 @@ uv run scrape_company_profiles.py && uv run scrape_financial_ratio.py && uv run 
 | `scrape_broker_search.py`    | Broker/dealer directory      | `data/brokerSearch.json`                                         |
 | `scrape_idx_news.py`         | Market news headlines        | `data/idx_news.json`                                             |
 | `scrape_index_summary.py`    | Daily index summary          | `data/index_summary.json`                                        |
+| `scrape_stock_prices.py`     | Daily OHLCV stock prices     | PostgreSQL `stock_prices` table                                  |
 
 ## 🛠️ Analysis Scripts
 

@@ -9,6 +9,8 @@ import os
 
 from curl_cffi import requests
 
+from database.scraper_store import ScraperDatabase, save_raw_json
+
 # --- Configuration ---
 BASE_URL = "https://www.idx.co.id"
 INDEX_SUMMARY_ENDPOINT = "/primary/TradingSummary/GetIndexSummary"
@@ -49,12 +51,19 @@ def fetch_index_summary():
                 data = response.json()
                 print("Successfully parsed JSON.")
 
-                # Save to file in data directory
-                ensure_data_dir()
-                with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                # PostgreSQL is the primary sink; JSON is optional raw backup.
+                save_raw_json(OUTPUT_FILE, data)
+                records = data if isinstance(data, list) else data.get("data", [])
+                try:
+                    with ScraperDatabase() as store:
+                        imported = store.insert_index_summaries(records)
+                    print(f"Persisted {imported} index summary records to PostgreSQL")
+                except Exception as exc:
+                    print(f"PostgreSQL persistence failed: {exc}")
+                    raise
 
-                print(f"Data saved to {OUTPUT_FILE}")
+                if os.getenv("SCRAPER_SAVE_JSON", "false").lower() == "true":
+                    print(f"Raw data saved to {OUTPUT_FILE}")
 
                 # Print a snippet to verify
                 preview = str(data)[:200]

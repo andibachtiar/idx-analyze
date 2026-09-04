@@ -14,11 +14,15 @@ Tools return structured dictionaries suitable for AI consumption:
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Union
 
 # Import data loader
-from ai.data_loader import get_data_loader
+if os.getenv("DATABASE_URL"):
+    from ai.data_loader_pg import get_data_loader
+else:
+    from ai.data_loader import get_data_loader
 
 # Import data registry for LLM access
 from ai.llm_config import get_data_registry
@@ -139,7 +143,6 @@ def get_stock_price(ticker: str, source: str = "yfinance") -> Dict[str, Any]:
     Returns:
         Dictionary with price information
     """
-    from ai.data_loader import get_data_loader
     loader = get_data_loader()
     price_data = loader.get_stock_price(ticker)
 
@@ -181,7 +184,6 @@ def get_financials(
     Returns:
         Dictionary with financial metrics
     """
-    from ai.data_loader import get_data_loader
     loader = get_data_loader()
     ratios = loader.get_financial_ratios(ticker)
 
@@ -217,7 +219,6 @@ def get_fundamental_analysis(ticker: str, metrics: Optional[FinancialMetrics] = 
     Returns:
         Dictionary with fundamental analysis results
     """
-    from ai.data_loader import get_data_loader
 
     # If no metrics provided, try to load from data loader
     if metrics is None:
@@ -325,21 +326,30 @@ def get_technical_analysis(
     Returns:
         Dictionary with technical analysis results
     """
-    from ai.data_loader import get_data_loader
 
     # Try to get price data from loader if not provided
     if prices is None:
         loader = get_data_loader()
-        price_data = loader.get_stock_price(ticker)
-        if price_data and price_data.get("price"):
-            # Use current price with a note that we don't have historical data
-            return {
-                "ticker": ticker.upper(),
-                "calculated_at": str(datetime.now()),
-                "indicators": {},
-                "signals": {},
-                "notes": "Historical price data not available for technical indicators. Only current price known: " + str(price_data.get("price")),
-            }
+        # Prefer the historical price series so real indicators can be computed;
+        # fall back to the latest quote only when no history is stored.
+        historical = loader.get_historical_prices(ticker, days=250)
+        if historical and len(historical) >= 20:
+            prices = [
+                _safe_float(h.get("price"))
+                for h in historical
+                if _safe_float(h.get("price")) is not None
+            ]
+        else:
+            price_data = loader.get_stock_price(ticker)
+            if price_data and price_data.get("price"):
+                # Use current price with a note that we don't have historical data
+                return {
+                    "ticker": ticker.upper(),
+                    "calculated_at": str(datetime.now()),
+                    "indicators": {},
+                    "signals": {},
+                    "notes": "Historical price data not available for technical indicators. Only current price known: " + str(price_data.get("price")),
+                }
 
     result = {
         "ticker": ticker.upper(),
@@ -412,7 +422,6 @@ def get_valuation(
     Returns:
         Dictionary with valuation results
     """
-    from ai.data_loader import get_data_loader
 
     # Try to get price and metrics from data loader if not provided
     loader = get_data_loader()
@@ -480,7 +489,6 @@ def get_historical_analysis(
     Returns:
         Dictionary with historical analysis (growth rates, trends)
     """
-    from ai.data_loader import get_data_loader
 
     result = {
         "ticker": ticker.upper(),
@@ -522,7 +530,6 @@ def get_company_info(ticker: str) -> Dict[str, Any]:
     Returns:
         Dictionary with company information
     """
-    from ai.data_loader import get_data_loader
     loader = get_data_loader()
     info = loader.get_company_info(ticker)
 
@@ -560,7 +567,6 @@ def get_company_news(
     Returns:
         Dictionary with news articles
     """
-    from ai.data_loader import get_data_loader
     loader = get_data_loader()
     news = loader.get_news(ticker, limit)
 

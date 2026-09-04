@@ -5,16 +5,9 @@ Tests for financial data models.
 import os
 import sys
 from datetime import date, datetime
-from unittest.mock import MagicMock
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Mock external dependencies
-sys.modules['neo4j'] = MagicMock()
-sys.modules['psycopg2'] = MagicMock()
-sys.modules['psycopg2.extensions'] = MagicMock()
-sys.modules['sqlalchemy'] = MagicMock()
 
 import pytest
 

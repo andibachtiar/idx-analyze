@@ -103,8 +103,15 @@ class AIResearcher:
             )
         if self.api_key:
             try:
-                self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-                print(f"OpenAI client initialized with model: {self.model}")
+                print(f"[DEBUG] Initializing OpenAI client with model: {self.model}")
+                print(f"[DEBUG] Base URL: {self.base_url}")
+                # Add timeout to prevent hanging
+                self._client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    timeout=30.0  # 30 second timeout
+                )
+                print(f"OpenAI client initialized successfully")
             except Exception as e:
                 print(f"Failed to initialize OpenAI client: {e}")
                 self._client = None
@@ -182,15 +189,23 @@ class AIResearcher:
             LLM response text
         """
         if not self.client:
+            print("[DEBUG] No client available, using mock response")
             return self._mock_llm_response(messages)
 
         try:
+            print(f"[DEBUG] Calling LLM with model: {self.model}")
+            print(f"[DEBUG] Sending {len(messages)} messages")
+
+            # Use streaming with timeout to prevent hanging
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=0.3,
                 max_tokens=4096,
+                timeout=30,  # 30 second timeout for the request
+                stream=False,
             )
+            print("[DEBUG] LLM response received successfully")
             return response.choices[0].message.content or ""
         except Exception as e:
             print(f"LLM call failed: {e}")
@@ -242,23 +257,42 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         Returns:
             ResearchReport with complete analysis
         """
+        print(f"[DEBUG] Starting analysis for {ticker}")
+
         if question is None:
             question = f"What is your assessment of {ticker}?"
 
         # Retrieve data from tools
+        print("[DEBUG] Loading stock price...")
         price_data = get_stock_price(ticker)
+        print(f"[DEBUG] Price data loaded: {price_data is not None}")
+
+        print("[DEBUG] Loading fundamental analysis...")
         fundamental_data = get_fundamental_analysis(ticker)
+        print(f"[DEBUG] Fundamental data loaded: {fundamental_data is not None}")
+
+        print("[DEBUG] Loading valuation...")
         valuation_data = get_valuation(ticker)
+        print(f"[DEBUG] Valuation data loaded: {valuation_data is not None}")
+
+        print("[DEBUG] Loading technical analysis...")
         technical_data = get_technical_analysis(ticker)
+        print(f"[DEBUG] Technical data loaded: {technical_data is not None}")
+
+        print("[DEBUG] Loading company info...")
         company_info = get_company_info(ticker)
+        print(f"[DEBUG] Company info loaded: {company_info is not None}")
+
+        print("[DEBUG] Loading news...")
         news_data = get_company_news(ticker, limit=5)
+        print(f"[DEBUG] News data loaded: {news_data is not None}")
 
         historical_data = {}
         if include_history:
-            # Note: Would need raw historical data for full analysis
             historical_data = {"note": "Historical data not available in mock mode"}
 
-        # Prepare data context with all available information
+        # Prepare data context
+        print("[DEBUG] Preparing data context...")
         data_context = self._prepare_data_context(
             ticker=ticker,
             fundamental_data=fundamental_data,
@@ -269,6 +303,7 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
             news_data=news_data,
             price_data=price_data,
         )
+        print(f"[DEBUG] Data context length: {len(data_context)} chars")
 
         # Build prompt
         prompt = INITIAL_ANALYSIS_PROMPT.format(

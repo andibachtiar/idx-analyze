@@ -82,6 +82,7 @@ class TestResearcherInit:
     def test_create_researcher_without_api_key(self, monkeypatch):
         """Test creating researcher without API key (uses mock)."""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_MODEL", raising=False)  # Clear model env var
         researcher = AIResearcher(api_key=None)
         assert researcher.model == "gpt-4o"
         assert researcher.client is None
@@ -108,7 +109,8 @@ class TestResearcherInit:
             )
             mock_openai.assert_called_once_with(
                 api_key="test",
-                base_url="https://custom.api.com"
+                base_url="https://custom.api.com",
+                timeout=30.0
             )
 
 
@@ -240,8 +242,14 @@ class TestClaimTracker:
 class TestResearchWorkflow:
     """Tests for research workflow functions."""
 
-    def test_analyze_stock_returns_report(self):
+    def test_analyze_stock_returns_report(self, monkeypatch):
         """Test analyzing a stock returns a report."""
+        # Mock the LLM call to avoid network dependency
+        def mock_call_llm(self, messages):
+            return "# Test Response\n\nThis is a test analysis."
+
+        monkeypatch.setattr(AIResearcher, '_call_llm', mock_call_llm)
+
         report = analyze_stock("BBCA", question="Test question")
 
         assert isinstance(report, ResearchReport)
@@ -257,8 +265,14 @@ class TestResearchWorkflow:
             assert isinstance(report, ResearchReport)
             assert report.data_sources is not None
 
-    def test_compare_stocks_returns_report(self):
+    def test_compare_stocks_returns_report(self, monkeypatch):
         """Test comparing stocks returns a report."""
+        # Mock the LLM call
+        def mock_call_llm(self, messages):
+            return "# Comparison\n\nThese stocks are similar."
+
+        monkeypatch.setattr(AIResearcher, '_call_llm', mock_call_llm)
+
         report = compare_stocks(["BBCA", "BBRI"], question="Compare these")
 
         assert isinstance(report, ResearchReport)
@@ -269,8 +283,14 @@ class TestResearchWorkflow:
         researcher = create_researcher()
         assert isinstance(researcher, AIResearcher)
 
-    def test_researcher_analyze_method(self):
+    def test_researcher_analyze_method(self, monkeypatch):
         """Test researcher.analyze_stock method."""
+        # Mock the LLM call
+        def mock_call_llm(self, messages):
+            return "# Analysis\n\nTest analysis result."
+
+        monkeypatch.setattr(AIResearcher, '_call_llm', mock_call_llm)
+
         researcher = AIResearcher()
         report = researcher.analyze_stock("BBCA")
 
@@ -373,8 +393,14 @@ This is the conclusion.
 class TestIntegration:
     """Integration tests for the research pipeline."""
 
-    def test_full_analysis_pipeline(self):
+    def test_full_analysis_pipeline(self, monkeypatch):
         """Test full analysis pipeline from question to report."""
+        # Mock the LLM call to avoid network dependency
+        def mock_call_llm(self, messages):
+            return "# Test Response\n\nThis is a test analysis of BBCA."
+
+        monkeypatch.setattr(AIResearcher, '_call_llm', mock_call_llm)
+
         # Step 1: Get raw data
         price_data = get_stock_price("BBCA")
         fundamental_data = get_fundamental_analysis("BBCA")

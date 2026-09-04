@@ -157,7 +157,7 @@ class TestCoreTools:
         """Test get_fundamental_analysis without metrics."""
         result = get_fundamental_analysis("BBCA")
         assert "notes" in result
-        assert "No financial metrics provided" in result["notes"]
+        assert "No financial data found" in result["notes"]
 
     def test_get_technical_analysis_with_prices(self):
         """Test get_technical_analysis with price data."""
@@ -207,7 +207,7 @@ class TestCoreTools:
         """Test get_historical_analysis with insufficient data."""
         result = get_historical_analysis("BBCA", raw_data=[{"fsDate": "2024-12-31", "sales": 10000.0}])
         assert "notes" in result
-        assert "Insufficient historical data" in result["notes"]
+        assert "Historical financial data not available" in result["notes"]
 
     def test_get_company_news(self):
         """Test get_company_news returns expected structure."""

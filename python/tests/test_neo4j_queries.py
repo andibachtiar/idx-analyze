@@ -17,9 +17,6 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Mock neo4j dependency
-sys.modules['neo4j'] = MagicMock()
-
 import pytest
 
 from graph_models.queries import (
@@ -182,13 +179,11 @@ class TestNeo4jQueryEngine:
         assert self.engine.password == "test_password"
         assert self.engine._driver is None
 
-    def test_get_driver(self):
+    @patch('neo4j.GraphDatabase')
+    def test_get_driver(self, mock_graphdb):
         """Test driver creation."""
         mock_driver = MagicMock()
-        # sys.modules['neo4j'] is already mocked; set up the mock_chain manually
-        mock_graphdb = MagicMock()
         mock_graphdb.driver.return_value = mock_driver
-        sys.modules['neo4j'].GraphDatabase = mock_graphdb
 
         driver = self.engine._get_driver()
         assert driver == mock_driver
@@ -202,12 +197,11 @@ class TestNeo4jQueryEngine:
         mock_driver.close.assert_called_once()
         assert self.engine._driver is None
 
-    def test_context_manager(self):
+    @patch('neo4j.GraphDatabase')
+    def test_context_manager(self, mock_graphdb):
         """Test context manager usage."""
         mock_driver = MagicMock()
-        mock_graphdb = MagicMock()
         mock_graphdb.driver.return_value = mock_driver
-        sys.modules['neo4j'].GraphDatabase = mock_graphdb
 
         with Neo4jQueryEngine("bolt://test", "user", "pass") as engine:
             assert engine._driver == mock_driver

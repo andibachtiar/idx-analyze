@@ -7,17 +7,9 @@ Tests event classification, entity extraction, and event processing.
 import os
 import sys
 from datetime import datetime
-from unittest.mock import MagicMock
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Mock external dependencies
-sys.modules['neo4j'] = MagicMock()
-sys.modules['psycopg2'] = MagicMock()
-sys.modules['psycopg2.extensions'] = MagicMock()
-sys.modules['sqlalchemy'] = MagicMock()
-sys.modules['pandas'] = MagicMock()
 
 import pytest
 
@@ -29,7 +21,9 @@ from events import (
     EventProcessor,
     EventSentiment,
     EventType,
+    classif_news_records,
     classify_event,
+    event_to_dict,
     process_news_article,
 )
 
@@ -301,6 +295,50 @@ class TestIntegration:
             assert "BBCA" in tickers
             assert "BBRI" in tickers
             assert "TLKM" in tickers
+
+
+class TestNewsRecordsPipeline:
+    """Tests for classif_news_records and event_to_dict (news -> events)."""
+
+    def test_event_to_dict_serializes_enum_values(self):
+        event = CorporateEvent(
+            event_type=EventType.DIVIDEND,
+            tickers=["BBCA"],
+            title="BBCA Dividend",
+            published_at=datetime(2025, 1, 1),
+            source="IDX",
+            impact=EventImpact.HIGH,
+            sentiment=EventSentiment.POSITIVE,
+        )
+        d = event_to_dict(event)
+        assert d["event_type"] == "dividend"
+        assert d["impact"] == "high"
+        assert d["sentiment"] == "positive"
+        assert d["primary_ticker"] == "BBCA"
+        assert d["is_material"] is True
+
+    def test_classif_news_records(self):
+        news = [
+            {"ticker": "BBCA", "title": "BBCA Umumkan Dividen Interim", "content": "", "source": "IDX"},
+            {"ticker": "TLKM", "title": "TLKM Teken Kontrak 5G", "content": "", "source": "IDX"},
+            {"ticker": "ASII", "title": "ASII Laporkan Pendapatan dan Laba Rugi Q4", "content": "", "source": "IDX"},
+        ]
+        events = classif_news_records(news)
+        types = [e["event_type"] for e in events]
+        assert "dividend" in types
+        assert "new_contract" in types
+        assert "earnings" in types
+
+    def test_classif_news_records_returns_empty_for_generic(self):
+        news = [{"ticker": "BUMI", "title": "Seminar Go Public", "content": "", "source": "IDX"}]
+        assert classif_news_records(news) == []
+
+    def test_classif_news_records_handles_iso_datetime(self):
+        news = [{"ticker": "BBRI", "title": "BBRI Akuisisi Fintech", "content": "",
+                 "source": "IDX", "published_at": "2025-01-02T00:00:00"}]
+        events = classif_news_records(news)
+        assert events and events[0]["event_type"] == "acquisition"
+        assert events[0]["published_at"].startswith("2025-01-02")
 
 
 if __name__ == "__main__":

@@ -67,28 +67,71 @@ class DataLoader:
 
         # Search for ticker (case-insensitive)
         ticker_upper = ticker.upper()
-        for company in data:
-            if company.get("kode_emiten", "").upper() == ticker_upper:
-                return {
-                    "ticker": ticker_upper,
-                    "name": company.get("nama_perusahaan", ""),
-                    "sector": company.get("sectors", ""),
-                    "industry": company.get("industries", ""),
-                    "listing_date": company.get("date_listing", ""),
-                    "board": company.get("board", ""),
-                }
+
+        # Handle dict format: {"TICKER": {"Profiles": [...]}}
+        if isinstance(data, dict):
+            if ticker_upper in data:
+                company_data = data[ticker_upper]
+                # Extract from Profiles array
+                profiles = company_data.get("Profiles", [])
+                if profiles:
+                    profile = profiles[0]
+                    return {
+                        "ticker": ticker_upper,
+                        "name": profile.get("NamaEmiten", ""),
+                        "sector": profile.get("Sektor", ""),
+                        "industry": profile.get("Industri", ""),
+                        "listing_date": profile.get("TanggalPencatatan", ""),
+                        "board": profile.get("PapanPencatatan", ""),
+                    }
+            # Try case-insensitive search
+            for key in data:
+                if key.upper() == ticker_upper:
+                    company_data = data[key]
+                    profiles = company_data.get("Profiles", [])
+                    if profiles:
+                        profile = profiles[0]
+                        return {
+                            "ticker": ticker_upper,
+                            "name": profile.get("NamaEmiten", ""),
+                            "sector": profile.get("Sektor", ""),
+                            "industry": profile.get("Industri", ""),
+                            "listing_date": profile.get("TanggalPencatatan", ""),
+                            "board": profile.get("PapanPencatatan", ""),
+                        }
 
         # Try all companies list
         all_companies = self._load_json("allCompanies.json")
         if all_companies:
-            for company in all_companies:
-                if company.get("KodeEmiten", "").upper() == ticker_upper:
-                    return {
-                        "ticker": ticker_upper,
-                        "name": company.get("NamaEmiten", ""),
-                        "sector": company.get("Sector", ""),
-                        "industry": company.get("Industri", ""),
-                    }
+            # Handle both list and dict formats
+            if isinstance(all_companies, list):
+                for company in all_companies:
+                    if isinstance(company, dict) and company.get("KodeEmiten", "").upper() == ticker_upper:
+                        return {
+                            "ticker": ticker_upper,
+                            "name": company.get("NamaEmiten", ""),
+                            "sector": company.get("Sector", ""),
+                            "industry": company.get("Industri", ""),
+                        }
+            elif isinstance(all_companies, dict):
+                # Dict format: {"TICKER": {...}} or similar
+                for key, value in all_companies.items():
+                    if key.upper() == ticker_upper:
+                        # Value might be a dict with company info
+                        if isinstance(value, dict):
+                            return {
+                                "ticker": ticker_upper,
+                                "name": value.get("NamaEmiten", value.get("name", "")),
+                                "sector": value.get("Sector", value.get("sector", "")),
+                                "industry": value.get("Industri", value.get("industry", "")),
+                            }
+                    elif isinstance(value, dict) and value.get("KodeEmiten", "").upper() == ticker_upper:
+                        return {
+                            "ticker": ticker_upper,
+                            "name": value.get("NamaEmiten", ""),
+                            "sector": value.get("Sector", ""),
+                            "industry": value.get("Industri", ""),
+                        }
 
         return None
 
@@ -165,6 +208,25 @@ class DataLoader:
 
         return None
 
+    def get_historical_prices(self, ticker: str, days: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get historical price series.
+
+        The JSON data source only carries the latest quote, so this returns
+        at most the current price point (matching the PostgreSQL loader's
+        interface). Returns an empty list when no data is available.
+        """
+        price_data = self.get_stock_price(ticker)
+        if not price_data or not price_data.get("price"):
+            return []
+        return [
+            {
+                "date": price_data.get("as_of", datetime.now().isoformat()),
+                "price": price_data.get("price"),
+                "volume": price_data.get("volume"),
+            }
+        ]
+
     def get_company_summary(self, ticker: str) -> Optional[Dict[str, Any]]:
         """
         Get company summary from company summary file.
@@ -203,12 +265,42 @@ class DataLoader:
         if not data:
             return []
 
-        news = data if isinstance(data, list) else data.get("news", [])
+        # Handle different news formats
+        if isinstance(data, list):
+            news = data
+        elif isinstance(data, dict):
+            # Try common key names
+            news = data.get("news", []) or data.get("articles", []) or list(data.values())
+            if news and isinstance(news[0], dict):
+                news = news
+            else:
+                news = [data]
+        else:
+            news = []
 
         # Filter by ticker if provided
         if ticker:
             ticker_upper = ticker.upper()
-            news = [n for n in news if ticker_upper in n.get("symbols", []).upper()]
+            filtered = []
+            for n in news:
+                # Check various fields for ticker match
+                symbols = n.get("symbols", [])
+                if isinstance(symbols, str):
+                    symbols = [symbols]
+
+                # Check if ticker is in symbols or title or content
+                ticker_found = False
+                if symbols:
+                    ticker_found = any(s.upper() == ticker_upper for s in symbols)
+
+                if not ticker_found:
+                    title = n.get("title", "") or n.get("judul", "")
+                    content = n.get("content", "") or n.get("isi", "")
+                    ticker_found = ticker_upper in (title + content).upper()
+
+                if ticker_found:
+                    filtered.append(n)
+            news = filtered
 
         # Limit results
         return news[:limit]

@@ -16,19 +16,12 @@ Tests all deterministic valuation calculations including:
 import os
 import sys
 from datetime import date
-from unittest.mock import MagicMock
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Mock external dependencies
-sys.modules['neo4j'] = MagicMock()
-sys.modules['psycopg2'] = MagicMock()
-sys.modules['psycopg2.extensions'] = MagicMock()
-sys.modules['sqlalchemy'] = MagicMock()
-sys.modules['pandas'] = MagicMock()
-
 import pytest
+
 from analysis.valuation import (
     HistoricalValuation,
     ValuationResult,
@@ -44,7 +37,6 @@ from analysis.valuation import (
     get_valuation_signal,
     get_valuation_summary,
 )
-
 from models import FinancialMetrics
 
 # =============================================================================

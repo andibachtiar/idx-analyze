@@ -191,3 +191,54 @@ def process_news_article(
     """Quick function to process a news article into events."""
     processor = EventProcessor(known_tickers=known_tickers)
     return processor.process_article(title, content, source, **kwargs)
+
+
+def event_to_dict(event: CorporateEvent) -> Dict[str, Any]:
+    """Serialize a CorporateEvent into a plain dict for the API."""
+    return {
+        "event_type": event.event_type.value if event.event_type else None,
+        "tickers": event.tickers,
+        "primary_ticker": event.primary_ticker,
+        "title": event.title,
+        "published_at": event.published_at.isoformat() if event.published_at else None,
+        "source": event.source,
+        "description": event.description,
+        "url": event.url,
+        "sentiment": event.sentiment.value if event.sentiment else None,
+        "confidence": event.confidence,
+        "impact": event.impact.value if event.impact else None,
+        "entities": [{"name": e.name, "type": e.type, "ticker": e.ticker} for e in event.entities],
+        "is_material": event.is_material,
+    }
+
+
+def classif_news_records(news: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Classify a list of news dicts (from DB) into serialized CorporateEvents.
+
+    Each news dict should contain title/content/source/published_at/url/ticker.
+    Uses EventProcessor to detect event types; returns one event per detected
+    type (skipping articles with no matching event type).
+    """
+    known_tickers = [n.get("ticker") for n in news if n.get("ticker")]
+    processor = EventProcessor(known_tickers=known_tickers)
+    events: List[Dict[str, Any]] = []
+    for item in news:
+        title = item.get("title") or ""
+        content = item.get("content") or ""
+        published = item.get("published_at")
+        if isinstance(published, str):
+            try:
+                from datetime import datetime as _dt
+                published = _dt.fromisoformat(published)
+            except ValueError:
+                published = None
+        processed = processor.process_article(
+            title,
+            content,
+            item.get("source") or "IDX",
+            published_at=published,
+            url=item.get("url"),
+        )
+        for ev in processed:
+            events.append(event_to_dict(ev))
+    return events
