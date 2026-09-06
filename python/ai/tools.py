@@ -85,6 +85,48 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _as_pct(value: Any) -> Optional[float]:
+    """Convert a DB percent field (18.57) to a decimal (0.1857) for FinancialMetrics."""
+    num = _safe_float(value)
+    return num / 100.0 if num is not None else None
+
+
+def _metrics_from_db(ratios: Dict[str, Any]) -> Optional[FinancialMetrics]:
+    """Map a PostgreSQL ``financial_ratios`` row (DB column names) to FinancialMetrics.
+
+    The raw IDX JSON used old names like ``sales``/``profitAttrOwner``/``deRatio``; the
+    PostgreSQL loader returns column names (``revenue``/``net_income``/``debt_to_equity``).
+    Without this mapping the metrics would be empty and the analysis tabs empty.
+    """
+    if not ratios:
+        return None
+    return FinancialMetrics(
+        revenue=_safe_float(ratios.get("revenue")),
+        cost_of_goods_sold=_safe_float(ratios.get("cost_of_goods_sold")),
+        gross_profit=_safe_float(ratios.get("gross_profit")),
+        operating_income=_safe_float(ratios.get("operating_income")),
+        net_income=_safe_float(ratios.get("net_income")),
+        eps=_safe_float(ratios.get("eps")),
+        total_assets=_safe_float(ratios.get("total_assets")),
+        total_liabilities=_safe_float(ratios.get("total_liabilities")),
+        total_equity=_safe_float(ratios.get("total_equity")),
+        total_debt=_safe_float(ratios.get("total_debt")),
+        gross_margin=_as_pct(ratios.get("gross_margin")),
+        operating_margin=_as_pct(ratios.get("operating_margin")),
+        net_margin=_as_pct(ratios.get("net_margin")),
+        roe=_as_pct(ratios.get("roe")),
+        roa=_as_pct(ratios.get("roa")),
+        roic=_as_pct(ratios.get("roic")),
+        debt_to_equity=_safe_float(ratios.get("debt_to_equity")),
+        current_ratio=_safe_float(ratios.get("current_ratio")),
+        pe_ratio=_safe_float(ratios.get("pe_ratio")),
+        pb_ratio=_safe_float(ratios.get("pb_ratio")),
+        ev_ebitda=_safe_float(ratios.get("ev_ebitda")),
+        revenue_cagr_3y=_safe_float(ratios.get("revenue_cagr")),
+        earnings_cagr_3y=_safe_float(ratios.get("earnings_cagr")),
+    )
+
+
 def _format_metric_result(result: Any) -> Dict[str, Any]:
     """Format a MetricResult or similar object into a dict."""
     if result is None:
@@ -226,21 +268,8 @@ def get_fundamental_analysis(ticker: str, metrics: Optional[FinancialMetrics] = 
         ratios = loader.get_financial_ratios(ticker)
 
         if ratios:
-            # Convert financial ratios to FinancialMetrics format
-            metrics = FinancialMetrics(
-                revenue=_safe_float(ratios.get('sales')),
-                cost_of_goods_sold=_safe_float(ratios.get('cogs')) or (_safe_float(ratios.get('sales')) and _safe_float(ratios.get('gross_profit'))) and _safe_float(ratios.get('sales')) - _safe_float(ratios.get('gross_profit')) or None,
-                gross_profit=_safe_float(ratios.get('gross_profit')),
-                operating_income=_safe_float(ratios.get('ebt')),
-                net_income=_safe_float(ratios.get('profitAttrOwner')) or _safe_float(ratios.get('profitPeriod')),
-                eps=_safe_float(ratios.get('eps')),
-                total_assets=_safe_float(ratios.get('assets')),
-                total_liabilities=_safe_float(ratios.get('liabilities')),
-                total_equity=_safe_float(ratios.get('equity')),
-                roe=_safe_float(ratios.get('roe')) and _safe_float(ratios.get('roe')) / 100,
-                roa=_safe_float(ratios.get('roa')) and _safe_float(ratios.get('roa')) / 100,
-                debt_to_equity=_safe_float(ratios.get('deRatio')),
-            )
+            # Map the PostgreSQL row (DB column names) to FinancialMetrics.
+            metrics = _metrics_from_db(ratios)
         else:
             return {
                 "ticker": ticker.upper(),
@@ -434,21 +463,8 @@ def get_valuation(
     if metrics is None:
         ratios = loader.get_financial_ratios(ticker)
         if ratios:
-            # Convert ratios to FinancialMetrics format
-            metrics = FinancialMetrics(
-                revenue=_safe_float(ratios.get('sales')),
-                net_income=_safe_float(ratios.get('profitAttrOwner')) or _safe_float(ratios.get('profitPeriod')),
-                total_assets=_safe_float(ratios.get('assets')),
-                total_liabilities=_safe_float(ratios.get('liabilities')),
-                total_equity=_safe_float(ratios.get('equity')),
-                eps=_safe_float(ratios.get('eps')),
-                pe_ratio=_safe_float(ratios.get('per')),
-                pb_ratio=_safe_float(ratios.get('priceBV')),
-                debt_to_equity=_safe_float(ratios.get('deRatio')),
-                roe=_safe_float(ratios.get('roe')) and _safe_float(ratios.get('roe')) / 100,
-                roa=_safe_float(ratios.get('roa')) and _safe_float(ratios.get('roa')) / 100,
-                net_margin=_safe_float(ratios.get('npm')) and _safe_float(ratios.get('npm')) / 100,
-            )
+            # Map the PostgreSQL row (DB column names) to FinancialMetrics.
+            metrics = _metrics_from_db(ratios)
 
     if price is None or metrics is None:
         return {
@@ -685,6 +701,25 @@ def run_screening(
             "count": 0,
             "notes": "No filters or screen type provided"
         }
+
+    # Enrich screening data with technical indicators when needed.
+    # The ``technical`` preset (and any custom filter on a technical metric)
+    # needs price_vs_sma_200 / rsi_14 / volume_ratio, which live in price
+    # history, not financial_ratios.
+    technical_metrics = {"price_vs_sma_200", "rsi_14", "volume_ratio"}
+    needs_technical = screen_type == "technical" or any(
+        f.metric in technical_metrics for f in filters_obj
+    )
+    if needs_technical:
+        try:
+            from ai.data_loader_pg import get_data_loader
+            tech = get_data_loader().list_technical_metrics()
+            for ticker, vals in tech.items():
+                merged = stocks.setdefault(ticker, {})
+                for k, v in vals.items():
+                    merged.setdefault(k, v)
+        except Exception:
+            pass
 
     # Run screening
     result = screen_stocks(stocks, filters_obj, min_pass_rate=0)

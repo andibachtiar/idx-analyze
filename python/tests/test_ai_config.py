@@ -20,7 +20,6 @@ from ai.config import (
     DataSourceConfig,
     LLMConfig,
     LoggingConfig,
-    SchedulerConfig,
     SecurityConfig,
     VectorStoreConfig,
     get_active_model,
@@ -38,6 +37,7 @@ class TestLLMConfig:
         # Clear any existing env vars that might affect defaults
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_MODEL", raising=False)
+        monkeypatch.delenv("OPENAI_TEMPERATURE", raising=False)
         monkeypatch.delenv("LLM_PROVIDER", raising=False)
         monkeypatch.delenv("CACHE_TYPE", raising=False)
 
@@ -216,21 +216,6 @@ class TestCacheConfig:
         assert config.enabled is False
         assert config.cache_type == "redis"
         assert config.ttl_seconds == 1800
-
-
-class TestSchedulerConfig:
-    def test_default_values(self):
-        config = SchedulerConfig()
-        assert config.enabled is True
-        assert config.stock_price_interval_minutes == 5
-
-    def test_from_environment(self, monkeypatch):
-        monkeypatch.setenv("SCHEDULER_ENABLED", "false")
-        monkeypatch.setenv("SCHEDULER_STOCK_PRICE_INTERVAL_MINUTES", "10")
-
-        config = SchedulerConfig()
-        assert config.enabled is False
-        assert config.stock_price_interval_minutes == 10
 
 
 class TestAIConfig:

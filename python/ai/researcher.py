@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -61,6 +62,29 @@ from ai.tools import (
     get_valuation,
     run_screening,
 )
+
+
+def _derive_verdict(text: str) -> str:
+    """Extract a concise overall verdict from the LLM report text.
+
+    Prioritises actionable ratings (buy/sell/hold) then directional terms
+    (bullish/bearish/neutral). Returns "" when none are found.
+    """
+    low = (text or "").lower()
+    order = [
+        ("strong buy", "STRONG BUY"),
+        ("strong sell", "STRONG SELL"),
+        ("buy", "BUY"),
+        ("sell", "SELL"),
+        ("hold", "HOLD"),
+        ("bullish", "BULLISH"),
+        ("bearish", "BEARISH"),
+        ("neutral", "NEUTRAL"),
+    ]
+    for key, verdict in order:
+        if key in low:
+            return verdict
+    return ""
 
 
 class AIResearcher:
@@ -473,42 +497,50 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
             "conclusion": "",
         }
 
-        # Simple section extraction by headers
+        # Simple section extraction by headers (robust to '## 4. Valuation' style).
         current_section = None
         lines = response.split("\n")
 
         for line in lines:
             line_lower = line.lower().strip()
+            # Normalise header: strip leading #, numbering, and dashes.
+            header = line_lower
+            if header.startswith("#"):
+                header = header.lstrip("#")
+                header = re.sub(r"^[\s\d.\-]+", "", header).strip()
 
-            # Check for section headers
-            if "# executive summary" in line_lower:
-                current_section = "executive_summary"
-            elif "# business quality" in line_lower:
-                current_section = "business_quality"
-            elif "# growth" in line_lower or "# revenue/earnings growth" in line_lower:
-                current_section = "growth_analysis"
-            elif "# profitability" in line_lower:
-                current_section = "profitability"
-            elif "# financial health" in line_lower or "# balance sheet" in line_lower:
-                current_section = "financial_health"
-            elif "# valuation" in line_lower:
-                current_section = "valuation"
-            elif "# technical" in line_lower:
-                current_section = "technical_position"
-            elif "# recent events" in line_lower or "# catalysts" in line_lower:
-                current_section = "recent_events"
-            elif "# risks" in line_lower:
-                current_section = "risks"
-            elif "# bull case" in line_lower:
-                current_section = "bull_case"
-            elif "# base case" in line_lower:
-                current_section = "base_case"
-            elif "# bear case" in line_lower:
-                current_section = "bear_case"
-            elif "# conclusion" in line_lower:
-                current_section = "conclusion"
+            is_header = header != line_lower  # it was a markdown heading
+
+            # Check for section headers ONLY on actual markdown headings.
+            if is_header:
+                if "executive summary" in header or "summary" in header:
+                    current_section = "executive_summary"
+                elif "business quality" in header or "quality" in header:
+                    current_section = "business_quality"
+                elif "growth" in header or "revenue" in header or "earnings" in header:
+                    current_section = "growth_analysis"
+                elif "profitability" in header:
+                    current_section = "profitability"
+                elif "financial health" in header or "balance sheet" in header or "financial" in header:
+                    current_section = "financial_health"
+                elif "valuation" in header:
+                    current_section = "valuation"
+                elif "technical" in header:
+                    current_section = "technical_position"
+                elif "recent events" in header or "catalyst" in header or "news" in header:
+                    current_section = "recent_events"
+                elif "risk" in header:
+                    current_section = "risks"
+                elif "bull case" in header or "bullish case" in header:
+                    current_section = "bull_case"
+                elif "base case" in header:
+                    current_section = "base_case"
+                elif "bear case" in header or "bearish case" in header:
+                    current_section = "bear_case"
+                elif "conclusion" in header:
+                    current_section = "conclusion"
             elif current_section and line.strip():
-                # Add content to current section
+                # Add content to current section (non-header line)
                 if not sections[current_section]:
                     sections[current_section] = line.strip()
                 else:
@@ -518,10 +550,19 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         if not any(sections.values()):
             sections["executive_summary"] = response
 
+        # Ensure a usable executive summary exists even when the LLM didn't emit
+        # a dedicated header: fall back to the conclusion, then any section.
+        if not sections["executive_summary"]:
+            sections["executive_summary"] = (
+                sections["conclusion"]
+                or next((v for v in sections.values() if v), "")
+            )
+
         return ResearchReport(
             ticker=ticker,
             question=question,
             **sections,
+            overall_verdict=_derive_verdict(response),
         )
 
     def screen_and_analyze(

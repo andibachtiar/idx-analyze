@@ -368,6 +368,32 @@ def _executed_statements(fake_cursor) -> list[str]:
     return statements
 
 
+class TestDeterministicDedup:
+    """Phase 24: news dedup keys must be stable across processes."""
+
+    def test_stable_hash_is_deterministic(self):
+        from database.scraper_store import _stable_hash
+        first = _stable_hash("https://example.com/article/123")
+        second = _stable_hash("https://example.com/article/123")
+        assert first == second
+        assert len(first) == 40  # sha1 hex length
+
+    def test_number_rejects_nan_and_inf(self):
+        from database.scraper_store import _number
+        assert _number(float("nan")) is None
+        assert _number(float("inf")) is None
+        assert _number(float("-inf")) is None
+        assert _number(3.14) == 3.14
+
+    def test_insert_news_uses_deterministic_code_when_only_url(self):
+        store, fake_cursor = _make_store_with_fake_connection()
+        store.insert_news([{"title": "BBRI profit up", "url": "https://x.test/a", "source": "Test"}])
+        statements = _executed_statements(fake_cursor)
+        news_sql = next(s for s in statements if "INSERT INTO news_articles" in s)
+        # Must not rely on the non-deterministic builtin hash().
+        assert "hash(" not in news_sql
+
+
 class TestUpsertStockPrices:
     def test_upsert_maps_yfinance_keys(self):
         store, fake_cursor = _make_store_with_fake_connection()
@@ -495,3 +521,26 @@ class TestUpdateFinancialEnrichments:
         assert "12.0" in update_sql  # 0.12 -> 12
         assert "2.0" in update_sql
         assert "0.9" in update_sql
+
+    def test_does_not_double_scale_percent_dividend_yield(self):
+        """A yfinance dividendYield already returned as percent (18.10) stays 18.10."""
+        store, fake_cursor = _make_store_with_fake_connection()
+        count = store.update_financial_enrichments(
+            [{"ticker": "PSAB", "dividend_yield": 18.10}]
+        )
+        assert count == 1
+        statements = _executed_statements(fake_cursor)
+        update_sql = next(s for s in statements if "UPDATE financial_ratios" in s)
+        assert "18.1" in update_sql
+        assert "1810.0" not in update_sql
+
+    def test_clamps_dividend_yield_to_max_100(self):
+        """An out-of-band fraction (>1.0) is treated as percent and clamped to <=100."""
+        store, fake_cursor = _make_store_with_fake_connection()
+        count = store.update_financial_enrichments(
+            [{"ticker": "TEST", "dividend_yield": 123.0}]
+        )
+        assert count == 1
+        statements = _executed_statements(fake_cursor)
+        update_sql = next(s for s in statements if "UPDATE financial_ratios" in s)
+        assert "100.0" in update_sql

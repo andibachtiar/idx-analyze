@@ -7,11 +7,13 @@ Provides REST API endpoints for all analysis tools.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from ai.prompts.valuation import analyze_stock_valuation, calculate_wacc
 from ai.researcher import AIResearcher, analyze_stock, compare_stocks
@@ -28,6 +30,7 @@ from ai.tools import (
 )
 from ai.vector import create_vector_store
 from api.schemas import (
+    AlertRequest,
     ApiHealthResponse,
     BacktestRequest,
     BacktestResponse,
@@ -37,10 +40,13 @@ from api.schemas import (
     DocumentSearchRequest,
     DocumentSearchResponse,
     FinancialReportRequest,
+    FundamentalAnalysisRequest,
     FundamentalAnalysisResponse,
     HistoricalAnalysisResponse,
     IndustryMapRequest,
+    MacroImpactRequest,
     ResearchReportResponse,
+    ScreenAnalysisRequest,
     ScreenerRequest,
     ScreeningRequest,
     ScreeningResponse,
@@ -54,12 +60,36 @@ from api.schemas import (
 )
 from database.scraper_store import ScraperDatabase
 
+# Web assets directory (HTML, CSS, JS) served for the dashboard.
+WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
+
 # Create FastAPI app
 app = FastAPI(
     title="IDX-BEI Investment Research API",
     description="AI-powered stock research and analysis platform for Indonesian stocks",
     version="1.0.0",
 )
+
+
+def _json_safe(value):
+    """Normalise a value into JSON-compliant form (dates -> isoformat, NaN/Inf -> None)."""
+    import math
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value) if value == value else None
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 # Add CORS middleware
 app.add_middleware(
@@ -69,6 +99,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static assets (css/js) for the web dashboard
+app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
 
 # Initialize vector store
 vector_store = create_vector_store()
@@ -124,9 +157,17 @@ async def get_fundamentals(ticker: str):
 
 @app.get("/stocks/{ticker}/technical", response_model=TechnicalAnalysisResponse)
 async def get_technical(ticker: str, prices: list[float] = None):
-    """Get technical analysis for a stock."""
+    """Get technical analysis for a stock using real price history."""
     try:
-        result = get_technical_analysis(ticker, prices=prices or [])
+        from ai.data_loader_pg import get_data_loader
+        from ai.tools import get_technical_analysis as _run_technical
+
+        if prices:
+            close_prices = prices
+        else:
+            history = get_data_loader().get_historical_prices(ticker, days=300)
+            close_prices = [h["price"] for h in history if h.get("price") is not None]
+        result = _run_technical(ticker, prices=close_prices)
         return TechnicalAnalysisResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -138,18 +179,27 @@ async def get_valuation(
     price: float = None,
     historical_pe: list[tuple] = None,
 ):
-    """Get valuation analysis for a stock."""
+    """Get valuation analysis for a stock using real DB price + metrics."""
     try:
-        # Note: Would need FinancialMetrics object for full analysis
-        result = {
-            "ticker": ticker.upper(),
-            "valuation_date": datetime.now().strftime("%Y-%m-%d"),
-            "current_price": price,
-            "valuations": {},
-            "historical_comparison": {},
-            "notes": "Provide metrics for full valuation",
-        }
-        return ValuationResponse(**result)
+        from ai.data_loader_pg import get_data_loader
+        from ai.tools import _metrics_from_db
+        from ai.tools import get_valuation as _run_valuation
+
+        loader = get_data_loader()
+        if price is None:
+            quote = loader.get_stock_price(ticker)
+            price = (quote or {}).get("price")
+        metrics = _metrics_from_db(loader.get_financial_ratios(ticker))
+        result = _run_valuation(ticker, price=price, metrics=metrics, historical_pe=historical_pe)
+        # Normalise the dict to the response schema shape.
+        return ValuationResponse(
+            ticker=result.get("ticker", ticker.upper()),
+            valuation_date=result.get("valuation_date") or datetime.now().strftime("%Y-%m-%d"),
+            current_price=result.get("current_price") or price,
+            valuations=result.get("valuations") or {},
+            historical_comparison=result.get("historical_comparison") or {},
+            notes=result.get("notes"),
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -208,6 +258,26 @@ async def get_historical(ticker: str, raw_data: Optional[List[Dict[str, Any]]] =
     try:
         result = get_historical_analysis(ticker, raw_data=raw_data or [])
         return HistoricalAnalysisResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/ai/fundamental")
+async def ai_fundamental_analysis(request: FundamentalAnalysisRequest):
+    """Deterministic fundamental key-ratios + Signal Output, optional LLM interpretation."""
+    try:
+        from ai.prompts.fundamental import analyze_fundamentals
+
+        llm_client = None
+        if request.use_llm:
+            from ai.llm import LLMClient
+            llm_client = LLMClient()
+        result = analyze_fundamentals(
+            ticker=request.ticker,
+            use_llm=request.use_llm,
+            llm_client=llm_client,
+        )
+        return _json_safe({"status": "ok", **result})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -411,6 +481,160 @@ async def screen_stocks(request: ScreeningRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/ai/screen-analysis")
+async def ai_screen_analysis(request: ScreenAnalysisRequest):
+    """Run the deterministic screen, then interpret the top results with the LLM.
+
+    The scores/pass-fail come from ``run_screening`` (PostgreSQL data), and the
+    ``llm_analysis`` field is an evidence-based interpretation on top of those
+    deterministic results. It never invents financial numbers.
+    """
+    try:
+        from ai.data_loader_pg import get_data_loader
+        from ai.llm import LLMClient
+
+        loader = get_data_loader()
+        stocks = loader.list_stock_metrics()
+        result = run_screening(
+            stocks=stocks,
+            screen_type=request.screen_type,
+            filters=request.filters,
+        )
+
+        # Reduce to the requested tickers (if any), then top-N passed results.
+        results = result.get("results", [])
+        if request.tickers:
+            wanted = {t.strip().upper() for t in request.tickers}
+            results = [r for r in results if r.get("ticker") in wanted]
+        passed = [r for r in results if r.get("passed")]
+        top = passed[: max(1, request.top_n)]
+
+        llm_client = LLMClient()
+        llm_analysis = ""
+        if top and llm_client.is_available:
+            lines = [
+                "# Screener Top Picks to Interpret",
+                f"Screen type: {request.screen_type or 'custom'}",
+                f"Date: {datetime.now().strftime('%Y-%m-%d')}",
+                "",
+                "Ticker | Pass rate | Score | ROE | Net Marg | Debt/Eq | P/E | Div Yield",
+                "--------|-----------|-------|-----|----------|---------|-----|-----------",
+            ]
+            for r in top:
+                tr = r.get("ticker", "")
+                fr = r.get("filter_results", {}) or {}
+                metric = {}
+                for v in fr.values():
+                    if isinstance(v, dict) and "value" in v:
+                        metric.setdefault(str(v.get("filter") or ""), v.get("value"))
+                lines.append(
+                    f"{tr} | {r.get('pass_rate', 0):.1f} | {r.get('score', 0):.1f} | "
+                    f"{metric.get('roe', '-')} | {metric.get('net_margin', '-')} | "
+                    f"{metric.get('debt_to_equity', '-')} | {metric.get('pe_ratio', '-')} | "
+                    f"{metric.get('dividend_yield', '-')}"
+                )
+            prompt = "\n".join(lines)
+            if request.question:
+                prompt += f"\n\nFocus question: {request.question}"
+            llm_result = llm_client.analyze_with_prompt(
+                prompt=prompt,
+                system_message=(
+                    "You are a professional investment research analyst for Indonesian stocks "
+                    "(IDX/BEI). Interpret the deterministic screening results with evidence, "
+                    "clearly separating FACT, INTERPRETATION, ASSUMPTION and SPECULATION. "
+                    "Do not invent financial numbers and do not give buy/sell advice."
+                ),
+                output_format="Markdown: short summary, key observations, risks, and watchlist.",
+            )
+            llm_analysis = llm_result.get("content") or llm_result.get("error") or ""
+
+        return _json_safe({
+            "status": "ok",
+            "screen_type": request.screen_type,
+            "count": len(results),
+            "passed": len(passed),
+            "results": top,
+            "llm_analysis": llm_analysis,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/ai/macro-impact")
+async def ai_macro_impact(request: MacroImpactRequest):
+    """Interpret deterministic macro news impact tags (Fase B4).
+
+    The sector/direction/confidence and the sector ranking come deterministically
+    from ``news_impacts`` (built by ``enrich_news_impacts``). The LLM only
+    interprets and ranks that evidence; it never invents the sector/direction map.
+    """
+    try:
+        from ai.llm import LLMClient
+        from ai.prompts.macro_impact import analyze_macro_impacts
+
+        llm_client = LLMClient() if request.use_llm else None
+        result = analyze_macro_impacts(
+            hours=request.hours,
+            top_sectors=request.top_sectors,
+            focus=request.focus or "",
+            use_llm=request.use_llm,
+            llm_client=llm_client,
+        )
+        return _json_safe({
+            "status": "ok",
+            "generated_at": result["generated_at"],
+            "hours": result["hours"],
+            "total_impact_tags": result["total_impact_tags"],
+            "sectors": result["sectors"],
+            "llm_used": result["llm_used"],
+            "llm_analysis": result["llm_analysis"],
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/research/candidates")
+async def research_candidates(hours: int = 48, status: str = "", ticker: str = "", sector: str = ""):
+    """Return deterministic research candidates (Fase B5).
+
+    The sector/ticker/direction/confidence list is derived from the deterministic
+    news_impacts snapshot (never invented by the LLM). Pass ``ticker`` and/or
+    ``sector`` to filter to candidates relevant to a specific stock's own
+    industry (Research tab). The per-batch LLM interpretation (if enabled in the
+    daily pipeline) is attached once.
+    """
+    try:
+        from ai.data_loader_pg import get_data_loader
+
+        loader = get_data_loader()
+        rows = loader.get_research_candidates(
+            hours=hours,
+            status=status or None,
+            ticker=ticker or None,
+            sector=sector or None,
+        )
+        # Carry the freshest LLM narrative from the batch as a single summary.
+        llm_analysis = next(
+            (r.get("llm_interpretation") or "" for r in rows if r.get("llm_interpretation")),
+            "",
+        )
+        return _json_safe({
+            "status": "ok",
+            "hours": hours,
+            "ticker": ticker,
+            "sector": sector,
+            "count": len(rows),
+            "llm_used": bool(llm_analysis),
+            "llm_analysis": llm_analysis,
+            "candidates": [
+                {k: v for k, v in r.items() if k != "llm_interpretation"}
+                for r in rows
+            ],
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/compare")
 async def compare_stocks_endpoint(tickers: str):
     """Compare multiple stocks side-by-side using DB data."""
@@ -431,7 +655,7 @@ async def compare_stocks_endpoint(tickers: str):
                 "quote": {"price": (price or {}).get("price"), "as_of": (price or {}).get("as_of")},
                 "metrics": metrics,
             })
-        return {"status": "ok", "tickers": ticker_list, "stocks": result}
+        return _json_safe({"status": "ok", "tickers": ticker_list, "stocks": result})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -460,65 +684,130 @@ async def run_backtest_endpoint(request: BacktestRequest):
 # AI RESEARCH ENDPOINTS
 # =============================================================================
 
+def _research_report_to_dict(report) -> dict:
+    """Convert a ResearchReport object to the serializable dict used by the API."""
+    return {
+        "ticker": report.ticker,
+        "question": report.question,
+        "generated_at": report.timestamp.isoformat(),
+        "confidence_score": report.confidence,
+        "overall_verdict": getattr(report, "overall_verdict", ""),
+        "claim_summary": {"FACT": 0, "INTERPRETATION": 0, "ASSUMPTION": 0, "SPECULATION": 0},
+        "sections": {
+            "executive_summary": report.executive_summary,
+            "business_quality": report.business_quality,
+            "growth_analysis": report.growth_analysis,
+            "profitability": report.profitability,
+            "financial_health": report.financial_health,
+            "valuation": report.valuation,
+            "technical_position": report.technical_position,
+            "recent_events": report.recent_events,
+            "risks": report.risks,
+            "bull_case": report.bull_case,
+            "base_case": report.base_case,
+            "bear_case": report.bear_case,
+            "conclusion": report.conclusion,
+        },
+    }
+
+
 @app.post("/ai/analyze", response_model=ResearchReportResponse)
 async def ai_analyze_stock(request: StockAnalysisRequest):
     """Analyze a stock using AI researcher."""
-
-    print(request.ticker, request.question)
-
     try:
         report = analyze_stock(request.ticker, question=request.question)
-        # Convert ResearchReport to match ResearchReportResponse schema
-        result = {
-            "ticker": report.ticker,
-            "question": report.question,
-            "generated_at": report.timestamp.isoformat(),
-            "confidence_score": report.confidence,
-            "overall_verdict": getattr(report, 'overall_verdict', ''),
-            "claim_summary": {"FACT": 0, "INTERPRETATION": 0, "ASSUMPTION": 0, "SPECULATION": 0},
-            "sections": {
-                "executive_summary": report.executive_summary,
-                "business_quality": report.business_quality,
-                "growth_analysis": report.growth_analysis,
-                "profitability": report.profitability,
-                "financial_health": report.financial_health,
-                "valuation": report.valuation,
-                "technical_position": report.technical_position,
-                "recent_events": report.recent_events,
-                "risks": report.risks,
-                "bull_case": report.bull_case,
-                "base_case": report.base_case,
-                "bear_case": report.bear_case,
-                "conclusion": report.conclusion,
-            }
-        }
+        result = _research_report_to_dict(report)
+        # Persist to research memory so thesis history can be tracked over time.
+        try:
+            from ai.memory import save_research_report
+            save_research_report(request.ticker, result, question=request.question or "")
+        except Exception as mem_err:
+            print(f"Research memory save skipped: {mem_err}")
         return ResearchReportResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/stocks/{ticker}/research/analyze")
+async def generate_research(ticker: str, min_hours: int = 24, question: str = ""):
+    """Generate a full research report for a ticker, debounced by recency.
+
+    If a report was already saved within the last ``min_hours``, it returns that
+    existing report with ``status == "skipped"`` instead of regenerating it, so
+    repeated clicks / periodic runs do not spam the LLM. Otherwise it generates
+    a fresh full analysis (``analyze_stock``) and persists it to research memory.
+    """
+    try:
+        from ai.memory import ResearchMemory, save_research_report
+        from ai.researcher import analyze_stock as _analyze
+
+        memory = ResearchMemory()
+        latest = memory.get_latest_report(ticker)
+        if latest:
+            saved_at = latest.get("saved_at") or latest.get("generated_at")
+            if saved_at:
+                try:
+                    when = datetime.fromisoformat(saved_at)
+                    now = datetime.now().astimezone()
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=now.tzinfo)
+                    age_hours = (now - when).total_seconds() / 3600.0
+                    if age_hours < min_hours:
+                        return _json_safe({
+                            "status": "skipped",
+                            "reason": "recent_analysis",
+                            "age_hours": round(age_hours, 1),
+                            "min_hours": min_hours,
+                            "next_allowed_at": (when.timestamp() + min_hours * 3600) * 1000,
+                            "report": latest,
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+        report = _analyze(ticker, question=question or "")
+        result = _research_report_to_dict(report)
+        save_research_report(ticker, result, question=question or "")
+        return _json_safe({"status": "generated", "report": result})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/ai/analyze-stream")
 async def ai_analyze_stock_stream(request: StockAnalysisRequest):
-    """Analyze a stock using AI researcher with streaming response."""
+    """Analyze a stock using AI researcher, streaming SSE status + token chunks.
+
+    Structured Server-Sent Events so the UI can show the real phase
+    (collecting_data -> generating) instead of a static placeholder:
+      event: status  data: {"phase", "message"}
+      event: chunk   data: {"text"}
+      event: done    data: {}
+      event: error   data: {"message"}
+    """
     import asyncio
+    import json
 
     from fastapi.responses import StreamingResponse
 
+    def sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
     async def generate():
         try:
+            yield sse("status", {"phase": "preparing", "message": f"Menyiapkan akses data {request.ticker.upper()}..."})
+
             researcher = AIResearcher()
-            # Get the LLM client
             if not researcher.client:
-                yield "Error: LLM not configured. Set OPENAI_API_KEY environment variable."
+                yield sse("error", {"message": "LLM belum dikonfigurasi. Set OPENAI_API_KEY environment variable."})
                 return
 
-            # Prepare messages
+            # Pull deterministic context so the AI works from real data.
+            yield sse("status", {"phase": "collecting", "message": "Mengambil data fundamental, teknis & valuasi..."})
             messages = [
-                {"role": "system", "content": "You are a professional investment research analyst for Indonesian stocks (IDX/BEI). Provide detailed, evidence-based analysis."},
-                {"role": "user", "content": f"{request.question}"}
+                {"role": "system", "content": "You are a professional investment research analyst for Indonesian stocks (IDX/BEI). Provide detailed, evidence-based analysis. The user is asking about a specific stock on this page — always address that ticker directly and do not ask which stock they mean."},
+                {"role": "user", "content": f"Saham yang sedang dianalisis: {request.ticker.upper()} (Bursa Efek Indonesia). Pertanyaan: {request.question}"}
             ]
 
-            # Call LLM and stream response
+            yield sse("status", {"phase": "generating", "message": "Menyusun jawaban..."})
             response = await asyncio.to_thread(
                 researcher.client.chat.completions.create,
                 model=researcher.model,
@@ -529,10 +818,12 @@ async def ai_analyze_stock_stream(request: StockAnalysisRequest):
             )
 
             for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                choices = getattr(chunk, "choices", None) or []
+                if choices and getattr(choices[0], "delta", None) and getattr(choices[0].delta, "content", None):
+                    yield sse("chunk", {"text": choices[0].delta.content})
+            yield sse("done", {})
         except Exception as e:
-            yield f"Error: {str(e)}"
+            yield sse("error", {"message": str(e)})
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -676,7 +967,7 @@ async def list_stocks():
     """List all stocks with latest price for the dashboard."""
     try:
         from ai.data_loader_pg import get_data_loader
-        return {"status": "ok", "count": len(get_data_loader().list_stocks()), "stocks": get_data_loader().list_stocks()}
+        return _json_safe({"status": "ok", "count": len(get_data_loader().list_stocks()), "stocks": get_data_loader().list_stocks()})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -687,7 +978,40 @@ async def stock_price_history(ticker: str, start: str | None = None, end: str | 
     try:
         from ai.data_loader_pg import get_data_loader
         series = get_data_loader().get_price_history(ticker, start=start, end=end, limit=limit)
-        return {"status": "ok", "ticker": ticker.upper(), "prices": series}
+        return _json_safe({"status": "ok", "ticker": ticker.upper(), "prices": series})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/stocks/{ticker}/financials/history")
+async def stock_financial_history(ticker: str):
+    """Return multi-period financial ratios for a ticker (oldest first) for the fundamentals chart."""
+    try:
+        from ai.data_loader_pg import get_data_loader
+        series = get_data_loader().get_financial_ratio_history(ticker)
+        return _json_safe({"status": "ok", "ticker": ticker.upper(), "series": series})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/stocks/{ticker}/research-history")
+async def stock_research_history(ticker: str, limit: int = 3):
+    """Return saved AI research reports for a ticker (newest first)."""
+    try:
+        from ai.memory import get_research_history
+        reports = get_research_history(ticker, limit=limit)
+        return _json_safe({"status": "ok", "ticker": ticker.upper(), "count": len(reports), "reports": reports})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/stocks/{ticker}/thesis-comparison")
+async def stock_thesis_comparison(ticker: str, max_comparisons: int = 3):
+    """Compare past investment theses for a ticker."""
+    try:
+        from ai.memory import compare_research_theses
+        comparison = compare_research_theses(ticker, max_comparisons=max_comparisons)
+        return _json_safe({"status": "ok", "ticker": ticker.upper(), **comparison})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -701,13 +1025,13 @@ async def stock_profile(ticker: str):
         info = loader.get_company_info(ticker)
         price = loader.get_stock_price(ticker)
         ratios = loader.get_financial_ratios(ticker)
-        return {
+        return _json_safe({
             "status": "ok",
             "ticker": ticker.upper(),
             "profile": info,
             "quote": price,
             "metrics": ratios,
-        }
+        })
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -740,6 +1064,51 @@ async def remove_favorite(ticker: str):
     try:
         with ScraperDatabase() as store:
             removed = store.remove_favorite(ticker)
+        return {"status": "ok", "ticker": ticker.upper(), "removed": removed}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/favorites/details")
+async def favorites_details():
+    """Return favorites with alert config + latest close price."""
+    try:
+        with ScraperDatabase() as store:
+            details = store.get_favorites_details()
+        return _json_safe({"status": "ok", "count": len(details), "favorites": details})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/favorites/alerts")
+async def triggered_alerts():
+    """Return watchlist price alerts whose target has been triggered."""
+    try:
+        with ScraperDatabase() as store:
+            alerts = store.get_triggered_alerts()
+        return _json_safe({"status": "ok", "count": len(alerts), "alerts": alerts})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/favorites/{ticker}/alert")
+async def set_alert(ticker: str, request: AlertRequest):
+    """Set a price alert on a watchlist ticker (auto-adds to favorites)."""
+    try:
+        with ScraperDatabase() as store:
+            ok = store.set_price_alert(ticker, request.alert_price, request.direction)
+        return {"status": "ok", "ticker": ticker.upper(), "set": ok,
+                "alert_price": request.alert_price, "direction": request.direction}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/favorites/{ticker}/alert")
+async def remove_alert(ticker: str):
+    """Remove the price alert for a watchlist ticker."""
+    try:
+        with ScraperDatabase() as store:
+            removed = store.remove_price_alert(ticker)
         return {"status": "ok", "ticker": ticker.upper(), "removed": removed}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -790,10 +1159,7 @@ async def all_news(limit: int = 50, ticker: str | None = None):
 
 def _serve_web() -> HTMLResponse:
     """Return the dashboard SPA HTML."""
-    from pathlib import Path
-
-    web_root = Path(__file__).resolve().parent.parent / "web"
-    index_file = web_root / "index.html"
+    index_file = WEB_ROOT / "index.html"
     if index_file.exists():
         return HTMLResponse(index_file.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>IDX-BEI</h1><p>Web file not found.</p>")

@@ -8,6 +8,7 @@ link each article to a company.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import UTC, datetime
 
@@ -53,8 +54,9 @@ def fetch_ticker_news(yfinance_ticker: str) -> list:
             "url": url,
             "source": item.get("publisher") or "Yahoo Finance",
             "publishedAt": published_dt.isoformat() if published_dt else None,
-            # Deterministic dedup key derived from the URL.
-            "newsCode": f"{ticker}-{abs(hash(url))}",
+            # Deterministic dedup key derived from the URL (SHA-1 so re-runs
+            # produce the same key and ON CONFLICT dedupes correctly).
+            "newsCode": f"{ticker}-{hashlib.sha1((url or title or '').encode('utf-8', errors='ignore')).hexdigest()}",
             "itemType": item.get("type"),
         })
     return records

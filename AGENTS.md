@@ -41,11 +41,46 @@
 
 ## Pending Phases
 
-| Phase | Name                      | Description                  | Status    |
-| ----- | ------------------------- | ---------------------------- | --------- |
-| 24    | Data Pipeline Integration | Connect scrapers to AI tools | 📋 Queued |
-| 25    | UI/UX Enhancement         | Streaming chat interface     | 📋 Queued |
-| 26    | Real-time Data Updates    | Scheduled scraping + caching | 📋 Queued |
+| Phase | Name                      | Description                  | Status         |
+| ----- | ------------------------- | ---------------------------- | -------------- |
+| 24    | Data Pipeline Integration | Connect scrapers to AI tools | ✅ Complete    |
+| 25    | UI/UX Enhancement         | Dashboard & stock page UI    | 🟡 In Progress |
+| 26    | Real-time Data Updates    | Scheduled scraping + caching | ✅ Complete    |
+
+### Phase 25 — UI/UX Iterasi 1 & 2 (Selesai)
+
+- Dashboard (`/`): statistik ringkas, saham favorit, tabel semua emiten, filter sektor, pencarian.
+- Halaman per saham: grafik harga, profil perusahaan, key statistics, tab analisa.
+- Endpoint baru: `GET /stocks`, `GET /stocks/{ticker}/prices`, `GET /stocks/{ticker}`, favorites CRUD.
+- Migrasi `favorites` table (`202609040009_create_favorites_table`).
+- Iterasi 2: candlestick OHLC, overlay indikator (SMA 20/50/200, Bollinger) + volume sub-chart, routing URL `/stock/{ticker}`.
+- Iterasi 3: UI Screener (preset + filter kustom) & UI Perbandingan saham; `POST /screen` kini pakai data DB, endpoint `GET /compare`.
+- Iterasi 3: enrichment `dividend_yield`/`current_ratio`/`payout_ratio` dari yfinance (migrasi + `scrape_yahoo_financial_fields.py`) mengaktifkan screen Value/Quality/Dividend.
+- Iterasi 3: `revenue_cagr`/`earnings_cagr` dihitung dari yfinance `financials` (migrasi + `compute_cagr`) mengaktifkan screen Growth.
+- News & Events pipeline aktif: `scrape_idx_news.py` (2484 berita), `enrich_news_tickers.py` (799 ter-link), `events/classif_news_records()`, endpoint `/news`, `/stocks/{ticker}/news`, `/stocks/{ticker}/events`.
+- Iterasi 8: Watchlist + alert harga (`favorites` + kolom `alert_price`/`alert_direction`/`alert_enabled`; endpoint `/favorites/{ticker}/alert`, `/favorites/details`, `/favorites/alerts`; kontrol target per kartu favorit + banner alert tersentuh).
+- Fix tab Analisa: `get_fundamental_analysis`/`get_valuation` kini memetakan nama kolom DB (`revenue`, `net_income`, `debt_to_equity`, ...) via `_metrics_from_db` (sebelumnya pakai key JSON IDX lama `sales`/`profitAttrOwner`/`deRatio` → kosong); endpoint GET `/technical` & `/valuation` kini menarik harga/metrik dari DB (sebelumnya stub/kosong). Semua tab Fundamental/Technical/Valuation kini terisi dari data riil.
+- Dokumentasi roadmap: `docs/roadmap.md`.
+
+### Phase 24 — Data Pipeline Integration (Selesai)
+
+- **Scraper → PostgreSQL → AI tools terhubung**: semua scraper menulis ke DB via `ScraperDatabase` (idempotent `upsert_*`/`insert_news`), dibaca oleh `PostgreSQLDataLoader` untuk AI tools (`get_stock_price`, `get_financial_ratios`, `get_price_history`, `list_stock_metrics`, `get_news`).
+- **Orkestrasi `run_pipeline.py`**: satu entry point berurutan (`companies → prices → financial_ratio → yfinance → financial_history → news → news_link → company_news`) dengan retry/backoff, structured logging (`logs/pipeline.log`), dan failure ledger (`data/pipeline_ledger.jsonl`). `scrape_stock_prices` incremental via `stored_dates` (hanya fetch missing dates).
+- **Fix dedup berita deterministik**: ganti `abs(hash(url/title))` (non-deterministik karena `PYTHONHASHSEED`) dengan SHA-1 (`_stable_hash`) di `insert_news` & `scrape_company_news.py`, agar re-run tidak menduplikat artikel (ON CONFLICT news_code).
+- **Validasi numerik terpusat**: `_number` kini menolak NaN/Inf agar tidak mencemari kolom numerik; `backfill_financial_history.py` menormalisasi unit yfinance ke konvensi IDX (moneter ÷ 1e9, margin × 100).
+- **Data riil terisi**: 973 perusahaan, 429.718 harga, 2.886 financial_ratios (+multitahun via backfill), 2.484 berita (799 ter-link).
+
+### Phase 26 — Real-time Data Updates (Selesai)
+
+- **Scraping dijalankan oleh pipeline, bukan manual**: `run_pipeline.py` adalah satu-satunya entry point yang menarik semua scraper berurutan (`companies → prices → financial_ratio → yfinance → financial_history → news → news_link → company_news`) dengan retry/backoff, logging (`logs/pipeline.log`), dan failure ledger. Jalankan dengan `uv run python run_pipeline.py --all` (atau `--steps prices,news` untuk subset).
+- **Scheduling `scheduler.py`**: daemon loop yang menfiap Pipeline pada jadwal (env `SCRAPE_SCHEDULE_TIME` HH:MM Harian Asia/Jakarta, atau `SCRAPE_INTERVAL_HOURS` default 24h). Setiap selesai menjalankan `clear_cache()` agar API langsung membaca data baru. Semua stdlib (zoneinfo + subprocess), tanpa Celery/Redis.
+- **Read cache TTL**: `PostgreSQLDataLoader` kini mem-cache hasil baca yang sering dipanggil (`list_stocks`, `list_stock_metrics`, `get_price_history`, `get_news`, `get_financial_ratios`, `get_financial_ratio_history`, dll.) selama `DATA_CACHE_TTL` detik (default 60, 0 = mati). `_ttl_cache` decorator menjaga hit per-argumen & thread-safe-ish; `clear_cache()` membatalkannya setelah pipeline.
+- **Documentasi**: `docs/data-pipeline.md` menjelaskan bahwa scraping dilakukan oleh pipeline & cara menjalan/menjadwalkannya.
+- **Screen `technical` aktif**: `PostgreSQLDataLoader.list_technical_metrics()` menghitung `price_vs_sma_200`/`rsi_14`/`volume_ratio` per ticker dari riwayat harga (di-cache TTL) dan `run_screening` menggabungkannya untuk `screen_type='technical'`; tombol preset Technical di UI Screener + backfill harga (~5 tahun, `--steps prices --backfill`) membuatnya berfungsi.
+
+> **Catatan**: scraping otomatis & caching kini ditangani Phase 26 (Real-time Data Updates) — lihat `docs/data-pipeline.md`.
+
+Cakupan selanjutnya (favorit per-user, chat streaming, news, export) ada di roadmap.
 
 ---
 
@@ -53,16 +88,17 @@
 
 The following prompts exist in `prompt/` directory and need to be integrated:
 
-| Priority | Prompt                      | Description                                                        | Target Phase |
-| -------- | --------------------------- | ------------------------------------------------------------------ | ------------ |
-| 1        | stock-valuation.md          | Multi-method DCF + comparables valuation                           | PHASE 16 ✅  |
-| 2        | technical-analysis.md       | Chart patterns, MAs, Ichimoku, options flow                        | PHASE 17 ✅  |
-| 3        | stock-screener.md           | 5-factor scoring (Valuation, Quality, Momentum, Sentiment, Growth) | PHASE 18 ✅  |
-| 4        | financial-report-analyst.md | 10-K/10-Q document analysis                                        | PHASE 19 ✅  |
-| 5        | catalyst-calendar.md        | Event-driven catalyst identification                               | PHASE 20 ✅  |
-| 6        | competitor-analysis.md      | Moat & Porter's Five Forces analysis                               | PHASE 21 ✅  |
-| 7        | institutional-ownership.md  | 13F institutional holder tracking                                  | PHASE 22     |
-| 8        | industry-map.md             | Value chain & supply chain analysis                                | PHASE 23     |
+| Priority | Prompt                      | Description                                                                                    | Target Phase |
+| -------- | --------------------------- | ---------------------------------------------------------------------------------------------- | ------------ |
+| 1        | stock-valuation.md          | Multi-method DCF + comparables valuation                                                       | PHASE 16 ✅  |
+| 2        | technical-analysis.md       | Chart patterns, MAs, Ichimoku, options flow                                                    | PHASE 17 ✅  |
+| 3        | stock-screener.md           | 5-factor scoring (Valuation, Quality, Momentum, Sentiment, Growth)                             | PHASE 18 ✅  |
+| 4        | financial-report-analyst.md | 10-K/10-Q document analysis                                                                    | PHASE 19 ✅  |
+| 5        | catalyst-calendar.md        | Event-driven catalyst identification                                                           | PHASE 20 ✅  |
+| 6        | competitor-analysis.md      | Moat & Porter's Five Forces analysis                                                           | PHASE 21 ✅  |
+| 7        | institutional-ownership.md  | 13F institutional holder tracking                                                              | PHASE 22     |
+| 8        | industry-map.md             | Value chain & supply chain analysis                                                            | PHASE 23     |
+| 9        | fundamental-analysis.md     | Key ratios + deterministic Signal Output (`ai/prompts/fundamental.py`, `POST /ai/fundamental`) | PHASE 15+ ✅ |
 
 ### Integration Strategy
 
@@ -328,7 +364,7 @@ Tasks:
 
 Create:
 
-docs/architecture/current.md
+docs/architecture.md
 
 The document should contain:
 

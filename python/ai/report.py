@@ -36,6 +36,7 @@ class ResearchReport:
         base_case: str = "",
         bear_case: str = "",
         conclusion: str = "",
+        overall_verdict: str = "",
         data_sources: Optional[List[str]] = None,
         confidence: float = 0.0,
         timestamp: Optional[datetime] = None,
@@ -55,6 +56,7 @@ class ResearchReport:
         self.base_case = base_case
         self.bear_case = bear_case
         self.conclusion = conclusion
+        self.overall_verdict = overall_verdict
         self.data_sources = data_sources or []
         self.confidence = confidence
         self.timestamp = timestamp or datetime.now()
@@ -77,6 +79,7 @@ class ResearchReport:
             "base_case": self.base_case,
             "bear_case": self.bear_case,
             "conclusion": self.conclusion,
+            "overall_verdict": self.overall_verdict,
             "data_sources": self.data_sources,
             "confidence": self.confidence,
             "timestamp": self.timestamp.isoformat(),

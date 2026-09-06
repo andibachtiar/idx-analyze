@@ -32,7 +32,7 @@ class LLMClient:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: str = "gpt-4o",
+        model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: int = 4096,
     ):
@@ -42,13 +42,13 @@ class LLMClient:
         Args:
             api_key: API key (defaults to OPENAI_API_KEY env var)
             base_url: API base URL (defaults to OpenAI)
-            model: Model name to use
+            model: Model name to use (defaults to OPENAI_MODEL env var)
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
         """
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        self.model = model
+        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o")
         self.temperature = temperature
         self.max_tokens = max_tokens
 

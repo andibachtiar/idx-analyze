@@ -791,7 +791,8 @@ def get_technical_summary(prices: PriceList, period: int = 20) -> dict:
     # Extract key signals
     key_indicators = [
         "sma_20", "sma_50", "sma_200",
-        "rsi_14",
+        "ema_12", "ema_26",
+        "rsi_14", "macd",
         "bollinger_bands",
         "price_vs_sma_200",
         "volume_ratio"

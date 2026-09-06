@@ -441,5 +441,29 @@ class TestIntegration:
         assert summary["total_claims"] == 2
 
 
+class TestVerdictAndSummary:
+    """The parsed report must populate overall_verdict and executive_summary."""
+
+    def test_derive_verdict_buy(self):
+        from ai.researcher import _derive_verdict
+        assert _derive_verdict("Recommendation: BUY, high conviction") == "BUY"
+        assert _derive_verdict("The outlook is bearish") == "BEARISH"
+        assert _derive_verdict("No clear stance") == ""
+
+    def test_parser_populates_verdict_and_summary(self):
+        researcher = AIResearcher()
+        response = """
+# Executive Summary
+This is the summary.
+
+## Conclusion
+We recommend a buy for long-term investors.
+"""
+        report = researcher._parse_report_response("BBCA", "Test", response)
+        assert "summary" in report.executive_summary.lower()
+        assert "buy" in report.conclusion.lower()
+        assert report.overall_verdict == "BUY"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

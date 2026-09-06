@@ -1,0 +1,12 @@
+{"run_started_at": "-"}
+{"ts": "2026-09-04T16:49:53.738217+00:00", "step": "companies", "status": "ok", "attempts": 1, "seconds": 0.37}
+{"ts": "2026-09-04T17:06:42.747474+00:00", "step": "prices", "status": "ok", "attempts": 1, "seconds": 633.59}
+{"ts": "2026-09-04T17:28:59.235429+00:00", "step": "companies", "status": "ok", "attempts": 1, "seconds": 0.4}
+{"ts": "2026-09-05T01:59:50.713286+00:00", "step": "prices", "status": "ok", "attempts": 1, "seconds": 830.68}
+{"ts": "2026-09-05T07:59:59.135369+00:00", "step": "news_brave", "status": "ok", "attempts": 1, "seconds": 19.31}
+{"ts": "2026-09-05T07:59:59.295197+00:00", "step": "news_impacts", "status": "ok", "attempts": 1, "seconds": 0.14}
+{"ts": "2026-09-05T08:11:40.811407+00:00", "step": "news_brave", "status": "ok", "attempts": 1, "seconds": 17.24}
+{"ts": "2026-09-05T08:11:41.011712+00:00", "step": "news_impacts", "status": "ok", "attempts": 1, "seconds": 0.2}
+{"ts": "2026-09-05T16:46:31.406754+00:00", "step": "research_candidates", "status": "ok", "attempts": 1, "seconds": 1.18}
+{"ts": "2026-09-05T16:52:23.046621+00:00", "step": "research_candidates", "status": "ok", "attempts": 1, "seconds": 1.14}
+{"ts": "2026-09-06T04:49:00.752202+00:00", "step": "research_candidates", "status": "ok", "attempts": 1, "seconds": 1.38}

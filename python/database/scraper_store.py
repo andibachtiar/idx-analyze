@@ -6,6 +6,7 @@ backups and are controlled by SCRAPER_SAVE_JSON.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import date, datetime
@@ -94,10 +95,15 @@ class ScraperDatabase:
     def upsert_financial_ratios(self, records: Iterable[dict[str, Any]]) -> int:
         records = list(records)
         # Ensure referenced company rows exist before inserting ratios.
+        # Deduplicate by ticker so a batch of periods for the same company
+        # doesn't violate ON CONFLICT DO UPDATE (a row can only be affected
+        # once per command).
         companies = []
+        seen_tickers = set()
         for item in records:
             ticker = item.get("code") or item.get("ticker") or item.get("Symbol")
-            if ticker:
+            if ticker and ticker.upper() not in seen_tickers:
+                seen_tickers.add(ticker.upper())
                 companies.append({
                     "KodeEmiten": ticker,
                     "NamaEmiten": item.get("stockName") or ticker,
@@ -269,7 +275,12 @@ class ScraperDatabase:
                 continue
             dividend_yield = _number(item.get("dividend_yield") or item.get("dividendYield"))
             if dividend_yield is not None:
-                dividend_yield *= 100  # yfinance fraction -> percent
+                # yfinance returns a fraction (0.12) for most tickers but some
+                # IDX tickers already come back as a percent (18.10). Normalise
+                # to a percent without double-scaling, and clamp to a sane band.
+                if 0 < dividend_yield <= 1:
+                    dividend_yield *= 100
+                dividend_yield = min(dividend_yield, 100.0) if dividend_yield > 0 else dividend_yield
             rows.append((
                 str(ticker).upper(),
                 dividend_yield,
@@ -336,9 +347,9 @@ class ScraperDatabase:
                 or item.get("code")
             )
             if not news_code and url:
-                news_code = str(abs(hash(url)))
+                news_code = _stable_hash(url)
             if not news_code:
-                news_code = str(abs(hash(title)))
+                news_code = _stable_hash(title)
 
             ticker = (
                 item.get("Ticker")
@@ -407,6 +418,105 @@ class ScraperDatabase:
             )
             return [row[0] for row in cursor.fetchall()]
 
+    def upsert_research_candidates(
+        self,
+        candidates: Iterable[dict[str, Any]],
+        llm_interpretation: str = "",
+    ) -> int:
+        """Persist deterministic research candidates idempotently (Fase B5).
+
+        One row per (candidate_date, sector, ticker, direction). Re-running the
+        same day updates confidence/reason/LLM text instead of duplicating rows.
+        Propagates the FK for sector-level rows (ticker IS NULL).
+        """
+        candidates = list(candidates)
+        if not candidates:
+            return 0
+        today = date.today()
+        # Ensure referenced company rows exist before inserting ticker candidates.
+        self._ensure_companies(candidates)
+        rows = [
+            (
+                today,
+                c.get("sector") or "Unknown",
+                (c.get("ticker") or "").upper() or None,
+                c.get("direction") or "neutral",
+                float(c.get("confidence") or 0.0),
+                float(c.get("net_strength") or 0.0),
+                c.get("reason") or "",
+                llm_interpretation or "",
+                json.dumps(c.get("source_impacts") or [], default=str),
+                c.get("status") or "pending",
+            )
+            for c in candidates
+        ]
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO research_candidates
+                    (candidate_date, sector, ticker, direction, confidence,
+                     net_strength, reason, llm_interpretation, source_impacts, status)
+                VALUES %s
+                ON CONFLICT (candidate_date, sector, COALESCE(ticker, ''), direction)
+                DO UPDATE SET
+                    confidence = EXCLUDED.confidence,
+                    net_strength = EXCLUDED.net_strength,
+                    reason = EXCLUDED.reason,
+                    llm_interpretation = COALESCE(NULLIF(EXCLUDED.llm_interpretation, ''), research_candidates.llm_interpretation),
+                    source_impacts = EXCLUDED.source_impacts,
+                    status = EXCLUDED.status,
+                    batch_generated_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                rows,
+            )
+        self.connection.commit()
+        return len(rows)
+
+    def _ensure_companies(self, candidates: Iterable[dict[str, Any]]) -> None:
+        """Insert placeholder company rows for any tickers referenced by candidates."""
+        tickers = []
+        for c in candidates:
+            t = (c.get("ticker") or "").upper()
+            if t and t not in tickers:
+                tickers.append(t)
+        if not tickers:
+            return
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO companies (ticker, name)
+                VALUES %s
+                ON CONFLICT (ticker) DO NOTHING
+                """,
+                [(t, t) for t in tickers],
+            )
+
+    def get_research_candidates(self, hours: int | None = None) -> list[dict[str, Any]]:
+        """Return research candidates, optionally limited to the last ``hours``."""
+        self._ensure_connection()
+        assert self.connection is not None
+        query = (
+            "SELECT candidate_date, sector, ticker, direction, confidence, "
+            "net_strength, reason, status, llm_interpretation "
+            "FROM research_candidates "
+        )
+        params: tuple = ()
+        if hours:
+            query += "WHERE candidate_date >= CURRENT_DATE - CONCAT(%s, ' hours')::interval "
+            params = (hours,)
+        query += "ORDER BY candidate_date DESC, ABS(net_strength) DESC, sector ASC"
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, params)
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
     def add_favorite(self, ticker: str) -> bool:
         """Add a ticker to favorites. Returns True when newly added, False if it already existed."""
         ticker = str(ticker).upper()
@@ -436,6 +546,96 @@ class ScraperDatabase:
         self.connection.commit()
         return deleted
 
+    def set_price_alert(self, ticker: str, alert_price: float, direction: str = "above") -> bool:
+        """Set a price alert on a watchlist ticker (auto-adds it to favorites).
+
+        ``direction`` is ``above`` (alert when close >= target) or ``below``.
+        """
+        self._ensure_connection()
+        assert self.connection is not None
+        if alert_price <= 0:
+            raise ValueError("alert_price must be positive")
+        direction = "below" if direction == "below" else "above"
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO favorites (ticker, position, alert_price, alert_direction, alert_enabled)
+                VALUES (%s, COALESCE((SELECT MAX(position) FROM favorites), 0) + 1, %s, %s, true)
+                ON CONFLICT (ticker)
+                DO UPDATE SET alert_price = EXCLUDED.alert_price,
+                              alert_direction = EXCLUDED.alert_direction,
+                              alert_enabled = true,
+                              alert_updated_at = CURRENT_TIMESTAMP
+                RETURNING ticker
+                """,
+                (str(ticker).upper(), alert_price, direction),
+            )
+            row = cursor.fetchone()
+        self.connection.commit()
+        return bool(row and row[0])
+
+    def remove_price_alert(self, ticker: str) -> bool:
+        """Clear the price alert for a watchlist ticker."""
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE favorites SET alert_price = NULL, alert_enabled = false
+                WHERE ticker = %s
+                """,
+                (str(ticker).upper(),),
+            )
+            updated = cursor.rowcount > 0
+        self.connection.commit()
+        return updated
+
+    def get_favorites_details(self) -> list[dict[str, Any]]:
+        """Return favorites with their alert config and latest close price."""
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT f.ticker, f.alert_price, f.alert_direction, f.alert_enabled,
+                       sp.close_price, sp.trading_date
+                FROM favorites f
+                LEFT JOIN (
+                    SELECT ticker, close_price, trading_date,
+                           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) AS rn
+                    FROM stock_prices
+                ) sp ON sp.ticker = f.ticker AND sp.rn = 1
+                ORDER BY f.position ASC, f.created_at ASC
+                """
+            )
+            rows = cursor.fetchall()
+        details = []
+        for ticker, alert_price, direction, enabled, close, as_of in rows:
+            price = float(close) if close is not None else None
+            target = float(alert_price) if alert_price is not None else None
+            triggered = False
+            if target and price is not None:
+                triggered = (
+                    price >= target if direction == "above" else price <= target
+                )
+            details.append({
+                "ticker": ticker,
+                "alert_price": target,
+                "alert_direction": direction,
+                "alert_enabled": bool(enabled),
+                "current_price": price,
+                "as_of": str(as_of) if as_of else None,
+                "triggered": triggered,
+            })
+        return details
+
+    def get_triggered_alerts(self) -> list[dict[str, Any]]:
+        """Return active alerts whose price condition has been met."""
+        return [
+            d for d in self.get_favorites_details()
+            if d["alert_enabled"] and d["alert_price"] is not None and d["triggered"]
+        ]
+
     @staticmethod
     def _extract_news_url(item: dict[str, Any]) -> str | None:
         """Derive the news URL from the Links[].Href field."""
@@ -462,13 +662,29 @@ def save_raw_json(path: str | Path, data: Any) -> None:
     output.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 
 
+def _stable_hash(value: Any) -> str:
+    """Return a deterministic short hash for a string (DEDUP-stable).
+
+    Python's builtin ``hash`` is randomized per-process (PYTHONHASHSEED), so
+    using it as a persisted dedup key would produce a different value on every
+    run and silently duplicate records. SHA-1 is stable across processes and
+    machines.
+    """
+    text = str(value or "").encode("utf-8", errors="ignore")
+    return hashlib.sha1(text).hexdigest()
+
+
 def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    # Reject NaN / infinities so they never pollute numeric columns.
+    if str(number).lower() in ("nan", "inf", "+inf", "-inf") or number != number:
+        return None
+    return number
 
 
 def _int(value: Any) -> int | None:

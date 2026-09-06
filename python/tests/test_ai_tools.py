@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from ai.tools import (
     _format_metric_result,
     _format_structured_result,
+    _metrics_from_db,
     _safe_float,
     batch_compare,
     batch_screen,
@@ -486,6 +487,58 @@ class TestIntegration:
         revenue_growth = result["growth"].get("revenue", {})
         assert "value" in revenue_growth
         assert "is_available" in revenue_growth
+
+
+class TestMetricsFromDb:
+    """Regression: PostgreSQL rows use DB column names, not raw IDX JSON keys."""
+
+    def test_maps_db_columns_to_metrics(self):
+        row = {
+            "revenue": 100000.0,
+            "net_income": 20000.0,
+            "eps": 467.0,
+            "total_assets": 500000.0,
+            "total_equity": 60000.0,
+            "roe": 18.5,
+            "net_margin": 30.0,
+            "debt_to_equity": 0.5,
+            "pe_ratio": 14.0,
+            "revenue_cagr": 0.10,
+        }
+        m = _metrics_from_db(row)
+        assert m is not None
+        assert m.revenue == 100000.0
+        assert m.net_income == 20000.0
+        # Percent fields convert to decimals.
+        assert m.roe == 0.185
+        assert m.net_margin == 0.30
+        assert m.pe_ratio == 14.0
+        assert m.revenue_cagr_3y == 0.10
+
+    def test_returns_none_for_empty(self):
+        assert _metrics_from_db({}) is None
+
+
+class TestTechnicalScreen:
+    """The technical screen must use per-ticker technical indicators."""
+
+    def test_wilder_rsi_known_sequence(self):
+        from ai.data_loader_pg import _wilder_rsi
+        # All rising -> RSI near 100; short series -> None.
+        rising = [100.0 + i for i in range(15)]
+        rsi = _wilder_rsi(rising)
+        assert rsi is not None and rsi > 95
+        assert _wilder_rsi([1.0, 2.0]) is None  # too short
+
+    def test_technical_screen_filters_on_indicators(self):
+        stocks = {
+            "GOOD": {"price_vs_sma_200": 0.20, "rsi_14": 55.0, "volume_ratio": 1.5},
+            "BAD": {"price_vs_sma_200": -0.10, "rsi_14": 20.0, "volume_ratio": 0.2},
+        }
+        result = run_screening(stocks=stocks, screen_type="technical")
+        passed = {r["ticker"] for r in result["results"] if r["passed"]}
+        assert "GOOD" in passed
+        assert "BAD" not in passed
 
 
 if __name__ == "__main__":

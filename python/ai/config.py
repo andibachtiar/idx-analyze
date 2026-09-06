@@ -352,25 +352,6 @@ class CacheConfig:
 
 
 # =============================================================================
-# SCHEDULER CONFIGURATION
-# =============================================================================
-
-@dataclass
-class SchedulerConfig:
-    """Scheduler configuration for periodic tasks."""
-    enabled: bool = True
-    stock_price_interval_minutes: int = 5
-    financial_data_interval_hours: int = 24
-    news_interval_minutes: int = 15
-
-    def __post_init__(self):
-        self.enabled = os.getenv("SCHEDULER_ENABLED", "true").lower() == "true"
-        self.stock_price_interval_minutes = int(os.getenv("SCHEDULER_STOCK_PRICE_INTERVAL_MINUTES", "5"))
-        self.financial_data_interval_hours = int(os.getenv("SCHEDULER_FINANCIAL_DATA_INTERVAL_HOURS", "24"))
-        self.news_interval_minutes = int(os.getenv("SCHEDULER_NEWS_INTERVAL_MINUTES", "15"))
-
-
-# =============================================================================
 # MASTER CONFIGURATION
 # =============================================================================
 
@@ -387,7 +368,6 @@ class AIConfig:
     api: APIConfig = None
     logging: LoggingConfig = None
     cache: CacheConfig = None
-    scheduler: SchedulerConfig = None
 
     def __post_init__(self):
         if self.llm is None:
@@ -410,8 +390,6 @@ class AIConfig:
             self.logging = LoggingConfig()
         if self.cache is None:
             self.cache = CacheConfig()
-        if self.scheduler is None:
-            self.scheduler = SchedulerConfig()
 
     def validate(self) -> list[str]:
         """Validate configuration and return list of warnings/errors."""
@@ -437,7 +415,6 @@ class AIConfig:
             "database_configured": bool(self.database.url),
             "vector_store_type": self.vector_store.store_type,
             "news_sources": self.data_source.news_sources,
-            "scheduler_enabled": self.scheduler.enabled,
         }
 
 
@@ -536,7 +513,6 @@ def print_config_summary():
     print(f"Database:         {'Configured' if summary['database_configured'] else 'Not configured'}")
     print(f"Vector Store:     {summary['vector_store_type']}")
     print(f"News Sources:     {', '.join(summary['news_sources'])}")
-    print(f"Scheduler:        {'Enabled' if summary['scheduler_enabled'] else 'Disabled'}")
     print("=" * 60 + "\n")
 
 

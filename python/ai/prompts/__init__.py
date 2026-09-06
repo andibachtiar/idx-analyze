@@ -149,6 +149,13 @@ from .financial_report import (
     analyze_financial_report,
     generate_financial_report_prompt,
 )
+from .fundamental import (
+    analyze_fundamentals,
+    compute_score,
+    generate_fundamental_prompt,
+    key_ratios,
+    signal_from_score,
+)
 from .industry_map import (
     BottleneckAnalysis,
     ChainEdge,
@@ -228,6 +235,12 @@ __all__ = [
     "screen_stocks_with_scoring",
     "generate_screener_prompt",
     "run_screening_analysis",
+    # Fundamental Analysis
+    "analyze_fundamentals",
+    "key_ratios",
+    "compute_score",
+    "signal_from_score",
+    "generate_fundamental_prompt",
     # Financial Report Analyst
     "FinancialReportAnalysis",
     "DocumentInfo",

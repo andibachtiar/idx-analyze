@@ -22,6 +22,12 @@ class StockAnalysisRequest(BaseModel):
     include_history: bool = Field(True, description="Include historical analysis")
 
 
+class FundamentalAnalysisRequest(BaseModel):
+    """Request for fundamental analysis interpretation."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    use_llm: bool = Field(False, description="Include LLM interpretation of the ratios")
+
+
 class StockComparisonRequest(BaseModel):
     """Request for stock comparison."""
     tickers: List[str] = Field(..., description="List of ticker symbols")
@@ -33,6 +39,29 @@ class ScreeningRequest(BaseModel):
     screen_type: Optional[str] = Field(None, description="Predefined screen type")
     filters: Optional[List[Dict[str, Any]]] = Field(None, description="Custom filters")
     min_pass_rate: float = Field(0.0, description="Minimum pass rate")
+
+
+class ScreenAnalysisRequest(BaseModel):
+    """Request for AI interpretation of screened stocks."""
+    screen_type: Optional[str] = Field(None, description="Predefined screen type")
+    filters: Optional[List[Dict[str, Any]]] = Field(None, description="Custom filters")
+    tickers: Optional[List[str]] = Field(None, description="Limit interpretation to these tickers")
+    question: Optional[str] = Field(None, description="Optional focus question for the AI")
+    top_n: int = Field(10, description="Number of top results to interpret")
+
+
+class MacroImpactRequest(BaseModel):
+    """Request for AI macro/impact interpretation from deterministic news tags."""
+    hours: int = Field(48, description="Lookback window in hours")
+    top_sectors: int = Field(10, description="Max sectors to include in the LLM prompt")
+    focus: Optional[str] = Field(None, description="Optional focus question")
+    use_llm: bool = Field(True, description="Request an LLM interpretation")
+
+
+class AlertRequest(BaseModel):
+    """Request to set a price alert on a watchlist ticker."""
+    alert_price: float = Field(..., gt=0, description="Target price")
+    direction: str = Field("above", description="'above' or 'below'")
 
 
 class BacktestRequest(BaseModel):

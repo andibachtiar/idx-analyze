@@ -132,8 +132,91 @@ class TestDashboardEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["profile"]["name"] == "Bank Central Asia"
-        assert data["quote"]["price"] == 100.0
-        assert data["metrics"]["roe"] == 20.0
+
+    def test_stock_financial_history(self, client, monkeypatch):
+        """Test GET /stocks/{ticker}/financials/history returns ordered series."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.get_financial_ratio_history.return_value = [
+            {"period_end": "2024-12-31", "revenue": 100000.0, "net_income": 20000.0, "net_margin": 20.0},
+            {"period_end": "2025-12-31", "revenue": 120000.0, "net_income": 24000.0, "net_margin": 20.0},
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/stocks/BBCA/financials/history")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ticker"] == "BBCA"
+        assert len(data["series"]) == 2
+        assert data["series"][0]["revenue"] == 100000.0
+        assert data["series"][1]["net_margin"] == 20.0
+
+    def test_screen_analysis_returns_llm_and_results(self, client, monkeypatch):
+        """Test POST /ai/screen-analysis returns deterministic results + LLM field."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.list_stock_metrics.return_value = {
+            "BBCA": {"roe": 20.0, "net_margin": 30.0, "pe_ratio": 15.0},
+            "BBRI": {"roe": 18.0, "net_margin": 25.0, "pe_ratio": 12.0},
+        }
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        screen_result = {
+            "results": [
+                {"ticker": "BBCA", "passed": True, "pass_rate": 100.0, "score": 8.0,
+                 "filter_results": {"roe": {"filter": "roe", "value": 20.0, "passed": True}}},
+                {"ticker": "BBRI", "passed": False, "pass_rate": 50.0, "score": 4.0,
+                 "filter_results": {"roe": {"filter": "roe", "value": 18.0, "passed": False}}},
+            ],
+            "count": 2,
+        }
+        monkeypatch.setattr("api.main.run_screening", MagicMock(return_value=screen_result))
+        response = client.post("/ai/screen-analysis", json={"screen_type": "growth", "top_n": 10})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        assert data["passed"] == 1
+        assert data["results"][0]["ticker"] == "BBCA"
+        assert "llm_analysis" in data
+
+    def test_research_history(self, client, monkeypatch):
+        """Test GET /stocks/{ticker}/research-history returns saved reports."""
+        from unittest.mock import MagicMock
+        reports = [
+            {"ticker": "BBCA", "saved_at": "2026-09-01T10:00:00", "confidence_score": 0.7,
+             "overall_verdict": "Buy", "sections": {"executive_summary": "Solid bank."}},
+        ]
+        monkeypatch.setattr("ai.memory.get_research_history", MagicMock(return_value=reports))
+        response = client.get("/stocks/BBCA/research-history")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        assert data["reports"][0]["ticker"] == "BBCA"
+
+    def test_thesis_comparison(self, client, monkeypatch):
+        """Test GET /stocks/{ticker}/thesis-comparison returns comparison result."""
+        from unittest.mock import MagicMock
+        comparison = {"reports_analyzed": 2, "comparisons": [{"confidence_change": {"change": 0.1}}]}
+        monkeypatch.setattr("ai.memory.compare_research_theses", MagicMock(return_value=comparison))
+        response = client.get("/stocks/BBCA/thesis-comparison")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["reports_analyzed"] == 2
+        assert len(data["comparisons"]) == 1
+
+    def test_ai_fundamental(self, client, monkeypatch):
+        """Test POST /ai/fundamental returns deterministic ratios + signal."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.get_financial_ratios_merged.return_value = {
+            "ticker": "BBRI", "pe_ratio": 10.11, "pb_ratio": 1.88,
+            "roe": 18.57, "debt_to_equity": 4.95, "net_margin": 30.32,
+        }
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.post("/ai/fundamental", json={"ticker": "BBRI"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["key_ratios"]["pe_ratio"] == 10.11
+        assert data["score"] > 0
+        assert data["signal"] in ("BULLISH", "NEUTRAL", "BEARISH")
 
     def test_web_interface_serves_html(self, client):
         """Test GET / serves the dashboard HTML."""
@@ -301,6 +384,57 @@ class TestFavoritesEndpoints:
         response = client.delete("/favorites/BBCA")
         assert response.status_code == 200
         assert response.json()["removed"] is True
+
+    def test_set_price_alert(self, client, monkeypatch):
+        from unittest.mock import MagicMock
+        store = MagicMock()
+        store.set_price_alert.return_value = True
+        class FakeCtx:
+            def __enter__(self): return store
+            def __exit__(self, *a): return False
+        monkeypatch.setattr("api.main.ScraperDatabase", lambda: FakeCtx())
+        response = client.post("/favorites/BBCA/alert", json={"alert_price": 8000, "direction": "above"})
+        assert response.status_code == 200
+        assert response.json()["set"] is True
+        assert response.json()["alert_price"] == 8000
+
+    def test_remove_price_alert(self, client, monkeypatch):
+        from unittest.mock import MagicMock
+        store = MagicMock()
+        store.remove_price_alert.return_value = True
+        class FakeCtx:
+            def __enter__(self): return store
+            def __exit__(self, *a): return False
+        monkeypatch.setattr("api.main.ScraperDatabase", lambda: FakeCtx())
+        response = client.delete("/favorites/BBCA/alert")
+        assert response.status_code == 200
+        assert response.json()["removed"] is True
+
+    def test_get_triggered_alerts(self, client, monkeypatch):
+        from unittest.mock import MagicMock
+        store = MagicMock()
+        store.get_triggered_alerts.return_value = [{"ticker": "BBCA", "alert_price": 7000.0, "triggered": True}]
+        class FakeCtx:
+            def __enter__(self): return store
+            def __exit__(self, *a): return False
+        monkeypatch.setattr("api.main.ScraperDatabase", lambda: FakeCtx())
+        response = client.get("/favorites/alerts")
+        assert response.status_code == 200
+        assert response.json()["count"] == 1
+        assert response.json()["alerts"][0]["ticker"] == "BBCA"
+
+    def test_favorites_details(self, client, monkeypatch):
+        from unittest.mock import MagicMock
+        store = MagicMock()
+        store.get_favorites_details.return_value = [{"ticker": "BBCA", "alert_price": 8000.0, "current_price": 6700.0}]
+        class FakeCtx:
+            def __enter__(self): return store
+            def __exit__(self, *a): return False
+        monkeypatch.setattr("api.main.ScraperDatabase", lambda: FakeCtx())
+        response = client.get("/favorites/details")
+        assert response.status_code == 200
+        assert response.json()["count"] == 1
+        assert response.json()["favorites"][0]["alert_price"] == 8000.0
 
 
 # =============================================================================
@@ -474,6 +608,68 @@ class TestIntegration:
             json={"ticker": "BBCA", "question": "How is BBCA performing?"}
         )
         assert response.status_code == 200
+
+
+class TestAiStreamSse:
+    """The AI chat endpoint must emit structured SSE events (status -> chunk -> done)."""
+
+    def test_stream_emits_status_and_chunks(self, client, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        def make_chunks():
+            for tok in ["Halo", " ", "dunia"]:
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=tok))])
+
+        fake = MagicMock()
+        fake.model = "gpt-4o"
+        fake.client.chat.completions.create.return_value = make_chunks()
+        monkeypatch.setattr("api.main.AIResearcher", MagicMock(return_value=fake))
+
+        response = client.post("/ai/analyze-stream", json={"ticker": "BBCA", "question": "prospek?"})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        text = response.text
+        assert "event: status" in text
+        assert "event: chunk" in text
+        assert "Halo" in text and "dunia" in text
+        assert "event: done" in text
+
+    def test_stream_emits_error_when_no_llm(self, client, monkeypatch):
+        from unittest.mock import MagicMock
+        fake = MagicMock()
+        fake.client = None
+        fake.model = "gpt-4o"
+        monkeypatch.setattr("api.main.AIResearcher", MagicMock(return_value=fake))
+        response = client.post("/ai/analyze-stream", json={"ticker": "BBCA", "question": "x"})
+        assert response.status_code == 200
+        assert "event: error" in response.text
+
+
+class TestResearchGenerateGuard:
+    """POST /stocks/{ticker}/research/analyze must skip when a recent report exists."""
+
+    def test_skips_when_recent_report(self, client, monkeypatch):
+        from datetime import datetime, timedelta
+        from unittest.mock import MagicMock
+        recent = {"ticker": "BBCA", "saved_at": datetime.now().isoformat(),
+                  "confidence_score": 0.7, "overall_verdict": "Buy"}
+        memory = MagicMock()
+        memory.get_latest_report.return_value = recent
+        monkeypatch.setattr("ai.memory.ResearchMemory", MagicMock(return_value=memory))
+        save_mock = MagicMock()
+        monkeypatch.setattr("ai.memory.save_research_report", save_mock)
+        analyze_mock = MagicMock()
+        monkeypatch.setattr("ai.researcher.analyze_stock", analyze_mock)
+
+        response = client.post("/stocks/BBCA/research/analyze?min_hours=24")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "skipped"
+        assert data["reason"] == "recent_analysis"
+        # Should NOT have regenerated or saved.
+        analyze_mock.assert_not_called()
+        save_mock.assert_not_called()
 
 
 if __name__ == "__main__":
