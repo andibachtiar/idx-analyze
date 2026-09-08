@@ -24,6 +24,7 @@ let currentFundamentalMetric = "revenue";
 // Export / screener / compare tracking state
 let stocksView = [];
 let lastScreenData = { results: [] };
+let screenSortState = { key: "score", dir: "desc" };
 let lastCompareData = { stocks: [], tickers: [] };
 // AI chat state
 let aiStreaming = false;
@@ -1625,19 +1626,41 @@ function switchNav(nav) {
   }
 }
 
+const PRESET_INFO = {
+  buffett:
+    "Buffett: kualitas + valuasi murah (ROE tinggi, P/E rendah, utang rendah)",
+  value: "Value: saham murah relatif laba/aset (P/E & P/B rendah)",
+  growth: "Growth: pertumbuhan laba & revenue tinggi",
+  quality:
+    "Quality: profitabilitas & kesehatan balance sheet tinggi (margin, utang rendah)",
+  dividend: "Dividend: hasil dividen tinggi & payout wajar",
+  technical: "Technical: momentum harga (vs SMA200, RSI, volume)",
+};
+
+function updatePresetDesc(screenType) {
+  const el = document.getElementById("screenerPresetDesc");
+  if (!el) return;
+  el.textContent =
+    PRESET_INFO[screenType] || "Pilih preset atau atur filter di bawah.";
+}
+
 function setScreenPresetActive(screenType) {
   document
     .querySelectorAll(".screener-actions [data-preset]")
     .forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.preset === screenType);
     });
+  updatePresetDesc(screenType);
 }
 
 async function runScreenType(screenType) {
   setScreenPresetActive(screenType);
   const body = document.getElementById("screenBody");
+  const cols = screenType === "technical" ? 7 : 8;
   body.innerHTML =
-    '<tr><td colspan="8" class="loading">Menjalankan screener...</td></tr>';
+    '<tr><td colspan="' +
+    cols +
+    '" class="loading">Menjalankan screener...</td></tr>';
   try {
     const d = await fetchJSON("/screen", {
       method: "POST",
@@ -1697,30 +1720,125 @@ async function runCustomScreen() {
   }
 }
 
-function renderScreenResults(d) {
-  const body = document.getElementById("screenBody");
-  const rows = (d.results || []).slice(0, 100);
-  lastScreenData = { results: rows };
-  if (!rows.length) {
-    body.innerHTML =
-      '<tr><td colspan="8" class="muted">Tidak ada saham yang lolos filter.</td></tr>';
+function updateScreenSortIndicator() {
+  const ind = document.getElementById("screenSortInd");
+  if (!ind) return;
+  if (screenSortState.key !== "score") {
+    ind.textContent = "";
     return;
   }
-  body.innerHTML = rows
-    .map(
-      (r) =>
-        `<tr onclick="openStock('${r.ticker}')">
+  ind.textContent = screenSortState.dir === "desc" ? " ▼" : " ▲";
+}
+
+function toggleScreenSort() {
+  if (screenSortState.key === "score") {
+    screenSortState.dir = screenSortState.dir === "desc" ? "asc" : "desc";
+  } else {
+    screenSortState.key = "score";
+    screenSortState.dir = "desc";
+  }
+  renderScreenResults(lastScreenData);
+}
+
+function screenHeaderRow(isTechnical) {
+  const scoreTh =
+    '<th class="sortable" onclick="toggleScreenSort()">Score<span id="screenSortInd"></span></th>';
+  if (isTechnical) {
+    return (
+      "<tr>" +
+      "<th>Ticker</th>" +
+      "<th>Nama</th>" +
+      "<th>Harga</th>" +
+      "<th>vs SMA200</th>" +
+      "<th>RSI 14</th>" +
+      "<th>Volume</th>" +
+      scoreTh +
+      "</tr>"
+    );
+  }
+  return (
+    "<tr>" +
+    "<th>Ticker</th>" +
+    "<th>Nama</th>" +
+    "<th>ROE</th>" +
+    "<th>P/E</th>" +
+    "<th>Net Margin</th>" +
+    "<th>Debt/Eq</th>" +
+    "<th>Dividend</th>" +
+    scoreTh +
+    "</tr>"
+  );
+}
+
+function screenRowHtml(r, isTechnical) {
+  const mv = r.metric_values || {};
+  const scoreTd = r.score == null ? "" : Number(r.score).toFixed(3);
+  if (isTechnical) {
+    const pv = mv.price_vs_sma_200;
+    const rsi = mv.rsi_14;
+    const vol = mv.volume_ratio;
+    const pvsCls = pv == null ? "" : pv > 0 ? "up" : pv < 0 ? "down" : "";
+    const pvs =
+      pv == null
+        ? "—"
+        : (pv >= 0 ? "+" : "") + (Number(pv) * 100).toFixed(1) + "%";
+    const pvsTd = pvsCls ? `<span class="${pvsCls}">${pvs}</span>` : pvs;
+    return `<tr onclick="openStock('${r.ticker}')">
                 <td><span class="ticker-badge">${r.ticker}</span></td>
-                <td>—</td>
+                <td>${escapeHtml(r.name || "—")}</td>
+                <td>${mv.close == null ? "—" : fmtIDR(mv.close)}</td>
+                <td>${pvsTd}</td>
+                <td>${rsi == null ? "—" : Number(rsi).toFixed(1)}</td>
+                <td>${vol == null ? "—" : Number(vol).toFixed(2) + "x"}</td>
+                <td>${scoreTd}</td>
+              </tr>`;
+  }
+  return `<tr onclick="openStock('${r.ticker}')">
+                <td><span class="ticker-badge">${r.ticker}</span></td>
+                <td>${escapeHtml(r.name || "—")}</td>
                 <td>${r.filter_results?.roe?.passed ? "✓" : "—"}</td>
                 <td>${r.filter_results?.pe_ratio?.passed ? "✓" : "—"}</td>
                 <td>${r.filter_results?.net_margin?.passed ? "✓" : "—"}</td>
                 <td>${r.filter_results?.debt_to_equity?.passed ? "✓" : "—"}</td>
                 <td>${r.filter_results?.dividend_yield?.passed ? "✓" : "—"}</td>
-                <td>${r.score ?? ""}</td>
-              </tr>`,
-    )
-    .join("");
+                <td>${scoreTd}</td>
+              </tr>`;
+}
+
+function renderScreenResults(d) {
+  const body = document.getElementById("screenBody");
+  const head = document.getElementById("screenHead");
+  // Preserve the active screen type across renders (sorting / toggle re-renders).
+  const stype = lastScreenData.screen_type;
+  const isTechnical = stype === "technical";
+  const cols = isTechnical ? 7 : 8;
+  let rows = (d.results || []).slice();
+  if (screenSortState.key) {
+    const dir = screenSortState.dir === "desc" ? -1 : 1;
+    rows.sort((a, b) => {
+      const av = a[screenSortState.key];
+      const bv = b[screenSortState.key];
+      return (
+        ((av == null ? -Infinity : av) - (bv == null ? -Infinity : bv)) * dir
+      );
+    });
+  }
+  rows = rows.slice(0, 100);
+  lastScreenData = {
+    results: rows,
+    screen_type: stype,
+    filters: lastScreenData.filters,
+  };
+  if (head) head.innerHTML = screenHeaderRow(isTechnical);
+  if (!rows.length) {
+    body.innerHTML =
+      '<tr><td colspan="' +
+      cols +
+      '" class="muted">Tidak ada saham yang lolos filter.</td></tr>';
+    return;
+  }
+  updateScreenSortIndicator();
+  body.innerHTML = rows.map((r) => screenRowHtml(r, isTechnical)).join("");
 }
 
 async function analyzeScreenAI() {
@@ -1951,7 +2069,7 @@ function exportScreenCSV() {
       r.filter_results?.net_margin?.passed ? "✓" : "",
       r.filter_results?.debt_to_equity?.passed ? "✓" : "",
       r.filter_results?.dividend_yield?.passed ? "✓" : "",
-      r.score ?? "",
+      r.score == null ? "" : Number(r.score).toFixed(3),
     ]),
   );
 }
@@ -2004,3 +2122,5 @@ document.addEventListener("click", (e) => {
   }
 });
 routeFromPath();
+// Show the default screener preset description on first load.
+updatePresetDesc("");

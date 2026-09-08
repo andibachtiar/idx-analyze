@@ -643,6 +643,27 @@ def fcf_margin(free_cash_flow: float, revenue: float) -> MetricResult:
 # BATCH CALCULATION FROM FinancialMetrics
 # =============================================================================
 
+def _stored_cagr(value, metric_name: str) -> MetricResult:
+    """Wrap a precomputed CAGR value from the data source into a MetricResult.
+
+    ``FinancialMetrics`` can carry revenue/earnings/EPS CAGR that was already
+    computed during ingestion (e.g. ``compute_cagr`` backfill). Without this the
+    growth section reported "not available" even though the number is stored.
+    """
+    if value is None:
+        return MetricResult(
+            value=None,
+            metric_name=metric_name,
+            formula="CAGR stored in data source",
+        )
+    return MetricResult(
+        value=float(value),
+        metric_name=metric_name,
+        formula="CAGR stored in data source",
+        notes="Returns decimal (multiply by 100 for percentage)",
+    )
+
+
 def calculate_all_metrics(metrics: FinancialMetrics, period_label: str = "") -> dict:
     """
     Calculate all fundamental metrics from a FinancialMetrics object.
@@ -678,14 +699,29 @@ def calculate_all_metrics(metrics: FinancialMetrics, period_label: str = "") -> 
         metrics.cash_and_equivalents,
         metrics.operating_income  # Using OI as proxy for EBITDA when unavailable
     )
-    results["current_ratio"] = current_ratio(
-        metrics.current_assets,
-        metrics.current_liabilities
-    )
+    # Prefer a precomputed current ratio from the data source (e.g. the DB row
+    # stores ``current_ratio`` directly without the assets/liabilities split).
+    if metrics.current_ratio is not None:
+        results["current_ratio"] = MetricResult(
+            value=float(metrics.current_ratio),
+            metric_name="current_ratio",
+            formula="(from data source)",
+        )
+    else:
+        results["current_ratio"] = current_ratio(
+            metrics.current_assets,
+            metrics.current_liabilities
+        )
     results["interest_coverage"] = interest_coverage(
         metrics.operating_income,  # Using OI as proxy for EBIT
         metrics.interest_expense
     )
+
+    # Growth metrics (CAGR) — use stored values when available, otherwise the
+    # components are not present and the metric stays unavailable.
+    results["revenue_cagr_3y"] = _stored_cagr(metrics.revenue_cagr_3y, "revenue_cagr_3y")
+    results["earnings_cagr_3y"] = _stored_cagr(metrics.earnings_cagr_3y, "earnings_cagr_3y")
+    results["eps_cagr_3y"] = _stored_cagr(metrics.eps_cagr_3y, "eps_cagr_3y")
 
     # Cash flow metrics
     results["free_cash_flow"] = free_cash_flow(

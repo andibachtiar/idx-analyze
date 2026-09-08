@@ -128,6 +128,60 @@ IMPACT_RULES: list[tuple[str, str, list[str]]] = [
     ]),
     ("Perindustrian", "negative", [
         "pmi turun", "ekspor manufaktur turun", "pesanan turun",
+        "permintaan baja turun", "smelter ditunda", "banjir baja", "tarif impor",
+    ]),
+    # --- Telecommunication ---
+    ("Teknologi", "positive", [
+        "adopsi 5g", "pelanggan seluler naik", "penetrasi internet naik",
+        "data center", "cloud naik", "kecerdasan buatan", "digitalisasi",
+    ]),
+    # --- Utilities (power/EBT) ---
+    ("Utilitas", "positive", [
+        "tarif listrik naik", "penjualan listrik naik", "proyek pembangkit",
+        "energi terbarukan", "ebt", "panel surya", "kapasitas listrik naik",
+    ]),
+    ("Utilitas", "negative", [
+        "tarif listrik turun", "permintaan listrik turun", "pembangkit ditunda",
+        "subsidi listrik dipotong",
+    ]),
+    # --- Healthcare additions ---
+    ("Kesehatan", "positive", [
+        "bpjs naik", "anggaran kesehatan naik", "alat kesehatan", "obat generik",
+        "rumah sakit baru", "proyek rumah sakit",
+    ]),
+    ("Kesehatan", "negative", [
+        "harga obat turun", "regulasi obat ketat", "alat kesehatan dipangkas",
+        "tarif bpjs dipotong",
+    ]),
+    # --- Consumer discretionary additions ---
+    ("Barang Konsumen Non-Primer", "positive", [
+        "pariwisata naik", "travel naik", "okupansi hotel naik",
+        "penjualan ritel naik", "penjualan e-commerce naik",
+    ]),
+    ("Barang Konsumen Non-Primer", "negative", [
+        "okupansi hotel turun", "travel turun", "pariwisata turun",
+    ]),
+    # --- Consumer staples (pangan) additions ---
+    ("Barang Konsumen Primer", "positive", [
+        "panen raya", "pasokan pangan naik", "impor pangan turun",
+        "harga pangan turun", "harga beras turun", "harga minyak goreng turun",
+    ]),
+    ("Barang Konsumen Primer", "negative", [
+        "gagal panen", "el nino", "pasokan pangan turun", "harga pangan naik",
+        "harga beras naik", "harga minyak goreng naik", "inflasi pangan naik",
+    ]),
+    # --- Basic Materials additions (mining/pupuk) ---
+    ("Barang Baku", "positive", [
+        "harga pupuk naik", "pupuk naik", "harga baja naik", "baja naik",
+        "harga lpg naik", "harga nikel naik", "nikel naik", "harga timah naik",
+        "timah naik", "harga tembaga naik", "tembaga naik", "harga emas naik",
+        "emas naik", "harga cpo naik", "cpo naik", "harga crude palm oil naik",
+    ]),
+    ("Barang Baku", "negative", [
+        "harga pupuk turun", "pupuk turun", "harga baja turun", "baja turun",
+        "harga lpg turun", "harga nikel turun", "nikel turun", "harga timah turun",
+        "timah turun", "harga emas turun", "emas turun", "harga tembaga turun",
+        "tembaga turun", "harga cpo turun", "cpo turun",
     ]),
 ]
 

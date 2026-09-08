@@ -21,6 +21,49 @@ try:
 except ImportError:
     psycopg2 = None
 
+# --- Sector technical-ticker ranking (used by research candidates expansion) ---
+# Minimum-liquidity filter: keep only tickers whose liquidity (close x volume) is
+# at/above this sector percentile (0.40 = top 60% by liquidity), to drop illiquid
+# outliers that make big % moves on thin volume.
+LIQUIDITY_PERCENTILE = float(os.getenv("RESEARCH_CANDIDATES_LIQUIDITY_PERCENTILE", "0.40"))
+# Weighted technical composite (sums to 1.0) among the liquid-enough tickers:
+# trend (price vs SMA200), RSI health, volume ratio.
+TECH_TREND_WEIGHT = float(os.getenv("RESEARCH_CANDIDATES_TECH_TREND_WEIGHT", "0.5"))
+TECH_RSI_WEIGHT = float(os.getenv("RESEARCH_CANDIDATES_TECH_RSI_WEIGHT", "0.3"))
+TECH_VOL_WEIGHT = float(os.getenv("RESEARCH_CANDIDATES_TECH_VOL_WEIGHT", "0.2"))
+
+# The macro lexicon tags sectors in Indonesian ("Keuangan", "Barang Baku", ...) while
+# ``companies.sector`` stores the IDX/English GICS-style names ("Financials",
+# "Basic Materials", ...). Map Indonesian -> English so sector expansion reaches the
+# real members (e.g. "Keuangan" -> the 104 Financials incl. BBCA/BBRI/BMRI, not just
+# the handful tagged directly).
+SECTOR_NAME_MAP: dict[str, str] = {
+    "Keuangan": "Financials",
+    "Barang Baku": "Basic Materials",
+    "Energi": "Energy",
+    "Properti & Real Estat": "Properties & Real Estate",
+    "Barang Konsumen Primer": "Consumer Non-Cyclicals",
+    "Barang Konsumen Non-Primer": "Consumer Cyclicals",
+    "Infrastruktur": "Infrastructures",
+    "Transportasi & Logistik": "Transportation & Logistic",
+    "Teknologi": "Technology",
+    "Kesehatan": "Healthcare",
+    "Perindustrian": "Industrials",
+}
+
+
+def _sector_names(sector: str) -> list[str]:
+    """Return the English companies-sector name(s) for a macro/Indonesian sector."""
+    names = [sector]
+    mapped = SECTOR_NAME_MAP.get(sector)
+    if mapped and mapped not in names:
+        names.append(mapped)
+    # If an English name is passed, also accept its Indonesian alias.
+    for ind, eng in SECTOR_NAME_MAP.items():
+        if eng == sector and ind not in names:
+            names.append(ind)
+    return names
+
 
 def _ttl_cache(method):
     """Cache a read-only loader method result for CACHE_TTL seconds.
@@ -283,16 +326,25 @@ class PostgreSQLDataLoader:
 
     @_ttl_cache
     def get_historical_prices(self, ticker: str, days: int = 100) -> List[Dict[str, Any]]:
-        """Get historical stock prices for technical analysis."""
+        """Get historical stock prices for technical analysis.
+
+        Returns oldest->newest (ascending) so callers can pass it straight to
+        the technical engine, which expects ``prices[-1]`` to be the latest
+        close and ``prices[-period:]`` to be the most recent window.
+        """
         try:
             conn = self._get_connection()
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT trading_date, close_price, volume
-                    FROM stock_prices
-                    WHERE ticker = %s
-                    ORDER BY trading_date DESC
-                    LIMIT %s
+                    SELECT sub.trading_date, sub.close_price, sub.volume
+                    FROM (
+                        SELECT trading_date, close_price, volume
+                        FROM stock_prices
+                        WHERE ticker = %s
+                        ORDER BY trading_date DESC
+                        LIMIT %s
+                    ) sub
+                    ORDER BY sub.trading_date ASC
                 """, (ticker.upper(), days))
                 rows = cur.fetchall()
                 return [
@@ -366,30 +418,37 @@ class PostgreSQLDataLoader:
         This walks newest->oldest per ticker and keeps the first non-null value
         per field, giving the most complete snapshot for screening.
 
-        Result shape: ``{ticker: {metric_name: value}}``.
+        Result shape: ``{ticker: {metric_name: value, "name": company_name}}``.
         """
         try:
             conn = self._get_connection()
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT ticker,
-                           revenue, eps, total_assets, total_equity, total_debt,
-                           gross_margin, operating_margin, net_margin,
-                           roe, roa, roic, debt_to_equity, current_ratio,
-                           interest_coverage, pe_ratio, pb_ratio, ev_ebitda,
-                           dividend_yield, payout_ratio, revenue_cagr, earnings_cagr
-                    FROM financial_ratios
-                    ORDER BY ticker, fiscal_year DESC, fiscal_period DESC NULLS LAST
+                    SELECT fr.ticker, c.name,
+                           fr.revenue, fr.eps, fr.total_assets, fr.total_equity, fr.total_debt,
+                           fr.gross_margin, fr.operating_margin, fr.net_margin,
+                           fr.roe, fr.roa, fr.roic, fr.debt_to_equity, fr.current_ratio,
+                           fr.interest_coverage, fr.pe_ratio, fr.pb_ratio, fr.ev_ebitda,
+                           fr.dividend_yield, fr.payout_ratio, fr.revenue_cagr, fr.earnings_cagr
+                    FROM financial_ratios fr
+                    LEFT JOIN companies c ON c.ticker = fr.ticker
+                    ORDER BY fr.ticker, fr.fiscal_year DESC, fr.fiscal_period DESC NULLS LAST
                 """)
                 rows = cur.fetchall()
             metrics: Dict[str, Dict[str, Any]] = {}
             for r in rows:
                 d = dict(r)
                 ticker = d.pop("ticker")
+                name = d.pop("name", None)
                 merged = metrics.setdefault(ticker, {})
+                if name:
+                    merged["name"] = name
                 for k, v in d.items():
                     if v is not None and merged.get(k) is None:
-                        merged[k] = float(v)
+                        try:
+                            merged[k] = float(v)
+                        except (TypeError, ValueError):
+                            merged[k] = v
             # Normalise percent-ratio fields to decimals so screen thresholds
             # (roe >= 0.15, net_margin >= 0.10, etc.) are in the same convention.
             # dividend_yield stays percent (screens use >= 3.0) and CAGR stays
@@ -619,15 +678,14 @@ class PostgreSQLDataLoader:
             if status:
                 query += "AND status = %s "
                 params.append(status)
-            if ticker or sector:
-                conditions = []
-                if ticker:
-                    conditions.append("ticker = %s")
-                    params.append(ticker.upper())
-                if sector:
-                    conditions.append("sector = %s")
-                    params.append(sector)
-                query += "AND (" + " OR ".join(conditions) + ") "
+            if ticker:
+                # Strict per-ticker filter: don't widen to sister tickers that
+                # happen to share the same sector when a specific stock is open.
+                query += "AND ticker = %s "
+                params.append(ticker.upper())
+            elif sector:
+                query += "AND sector = %s "
+                params.append(sector)
             query += (
                 "ORDER BY candidate_date DESC, ABS(net_strength) DESC, sector ASC "
                 "LIMIT %s"
@@ -665,10 +723,13 @@ class PostgreSQLDataLoader:
         Used to expand a sector-level macro candidate into stock-level candidates
         without bloating ``news_impacts``. Liquidity proxy = latest close * volume
         from ``stock_prices``; tickers with no price data fall back to "na" so they
-        sort last. Deterministic tie-break by ticker ASC.
+        sort last. The Indonesian/English sector aliases are matched so a macro
+        sector ("Keuangan") expands to the real IDX members ("Financials").
+        Deterministic tie-break by ticker ASC.
         """
         try:
             conn = self._get_connection()
+            names = _sector_names(sector)
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -682,15 +743,108 @@ class PostgreSQLDataLoader:
                         ORDER BY trading_date DESC
                         LIMIT 1
                     ) p ON true
-                    WHERE c.sector = %s
+                    WHERE c.sector = ANY(%s)
                     ORDER BY liq DESC, c.ticker ASC
                     LIMIT %s
                     """,
-                    (sector, limit),
+                    (names, limit),
                 )
                 return [r["ticker"] for r in cur.fetchall()]
         except Exception as e:
             print(f"Error getting sector tickers: {e}")
+            return []
+
+    @_ttl_cache
+    def get_sector_technical_tickers(
+        self,
+        sector: str,
+        limit: int = 5,
+    ) -> List[str]:
+        """Return the technically-strongest, liquid-enough tickers in a sector.
+
+        Two deterministic stages:
+          1. Filter: keep only tickers whose liquidity (close x volume) is at or
+             above the sector's ``LIQUIDITY_PERCENTILE`` (default 40th pct) so
+             illiquid/outlier tickers are dropped before ranking.
+          2. Rank: among the qualifying tickers, score a weighted technical
+             composite and take the top ``limit``:
+               trend  (price_vs_sma_200)  weight 0.5  (30% above SMA -> 1.0)
+               rsi    (healthy ~55)       weight 0.3
+               volume (volume_ratio)      weight 0.2  (2x avg volume -> 1.0)
+        Falls back to liquidity order when the sector has no technical data, and
+        relaxes the liquidity filter if it would leave the sector empty.
+        """
+        try:
+            tech = self.list_technical_metrics()
+            conn = self._get_connection()
+            names = _sector_names(sector)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT c.ticker, COALESCE(p.close_price, 0) * COALESCE(p.volume, 0) AS liq
+                    FROM companies c
+                    LEFT JOIN LATERAL (
+                        SELECT close_price, volume
+                        FROM stock_prices
+                        WHERE ticker = c.ticker
+                        ORDER BY trading_date DESC
+                        LIMIT 1
+                    ) p ON true
+                    WHERE c.sector = ANY(%s)
+                    ORDER BY c.ticker
+                    """,
+                    (names,),
+                )
+                rows = cur.fetchall()
+
+            by_ticker: dict[str, float] = {}
+            for r in rows:
+                by_ticker[r["ticker"]] = float(r["liq"] or 0.0)
+
+            # Relative liquidity threshold: sector percentile (keeps liquid names,
+            # drops illiquid outliers that make big % moves on thin volume).
+            liq_values = sorted(v for v in by_ticker.values() if v > 0)
+            if liq_values:
+                idx = max(0, int(len(liq_values) * LIQUIDITY_PERCENTILE) - 1)
+                min_liq = liq_values[idx]
+            else:
+                min_liq = 0.0
+
+            def score(m):
+                pv = m.get("price_vs_sma_200")
+                rsi = m.get("rsi_14")
+                vol = m.get("volume_ratio")
+                if pv is None:
+                    return None
+                trend = min(max(float(pv) / 0.30, 0.0), 1.0)
+                rsi_health = max(0.0, 1.0 - abs((rsi or 55.0) - 55.0) / 45.0)
+                vol_health = min(float(vol or 1.0) / 2.0, 1.0)
+                return (TECH_TREND_WEIGHT * trend
+                        + TECH_RSI_WEIGHT * rsi_health
+                        + TECH_VOL_WEIGHT * vol_health)
+
+            ranked: list[tuple[float, str]] = []
+            researched = 0
+            for t, liq in by_ticker.items():
+                m = tech.get(t) or {}
+                sc = score(m)
+                if sc is None:
+                    continue
+                researched += 1
+                if liq < min_liq:
+                    continue
+                ranked.append((sc, t))
+
+            # If the liquidity filter emptied a sector that has technical data, relax it.
+            if researched and not ranked:
+                ranked = [(sc, t) for t in by_ticker for sc in [score(tech.get(t) or {})] if sc is not None]
+
+            if not ranked:
+                return self.get_sector_tickers(sector, limit=limit)
+            ranked.sort(key=lambda x: (-x[0], x[1]))
+            return [t for _, t in ranked[:limit]]
+        except Exception as e:
+            print(f"Error getting sector technical tickers: {e}")
             return []
 
     def has_data(self, ticker: str) -> bool:

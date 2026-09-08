@@ -33,6 +33,48 @@ LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "scheduler.log"
 TZ = ZoneInfo(os.environ.get("SCRAPE_TIMEZONE", "Asia/Jakarta"))
 
+# Data-refresh cadences and their intervals. The scheduler runs each cadence
+# when it becomes due, so heavy/lower-frequency steps (yfinance weekly,
+# financial_history monthly) are not hammered every cycle while daily steps
+# (prices/news/ratios) refresh every day.
+CADENCE_STATE = ROOT / "data" / "scheduler_cadence_state.json"
+CADENCE_INTERVALS = {"daily": timedelta(days=1), "weekly": timedelta(days=7), "monthly": timedelta(days=30)}
+
+
+def _read_cadence_state() -> dict:
+    try:
+        import json
+        if CADENCE_STATE.exists():
+            return json.loads(CADENCE_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _write_cadence_state(state: dict) -> None:
+    import json
+    CADENCE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    CADENCE_STATE.write_text(json.dumps(state, default=str), encoding="utf-8")
+
+
+def _due_cadences(state: dict, now: datetime) -> list[str]:
+    due = []
+    for cadence, interval in CADENCE_INTERVALS.items():
+        last_str = state.get(cadence)
+        if not last_str:
+            due.append(cadence)
+            continue
+        try:
+            last = datetime.fromisoformat(last_str)
+        except ValueError:
+            due.append(cadence)
+            continue
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=TZ)
+        if now - last >= interval:
+            due.append(cadence)
+    return due
+
 
 def _setup_logging() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -63,14 +105,16 @@ def next_run_at(now_local: datetime, schedule_time: str | None, interval_hours: 
     return candidate
 
 
-def run_pipeline_and_clear_cache() -> bool:
-    """Run ``run_pipeline.py --all`` then clear the loader cache."""
-    logging.info("Running pipeline: run_pipeline.py --all")
+def run_pipeline_and_clear_cache(cadence: str | None = None) -> bool:
+    """Run ``run_pipeline.py`` for a cadence (or all steps) then clear the cache."""
+    if cadence:
+        cmd = [sys.executable, "run_pipeline.py", "--cadence", cadence]
+        logging.info("Running pipeline cadence: %s", cadence)
+    else:
+        cmd = [sys.executable, "run_pipeline.py", "--all"]
+        logging.info("Running pipeline: run_pipeline.py --all")
     try:
-        result = subprocess.run(
-            [sys.executable, "run_pipeline.py", "--all"],
-            cwd=str(ROOT),
-        )
+        result = subprocess.run(cmd, cwd=str(ROOT))
     except Exception as exc:  # pragma: no cover
         logging.error("Pipeline launch failed: %s", exc)
         return False
@@ -86,6 +130,27 @@ def run_pipeline_and_clear_cache() -> bool:
     logging.info("Pipeline finished; read cache cleared.")
     run_auto_analyze_if_enabled()
     return True
+
+
+def run_due_cadences() -> dict[str, str]:
+    """Run each due cadence (daily/weekly/monthly) and record its last-run time.
+
+    Returns a mapping of cadence -> status ("ran" / "up-to-date").
+    """
+    now = datetime.now(TZ)
+    state = _read_cadence_state()
+    results: dict[str, str] = {}
+    for cadence in _due_cadences(state, now):
+        logging.info("Cadence %s is due; running.", cadence)
+        ok = run_pipeline_and_clear_cache(cadence)
+        results[cadence] = "ran" if ok else "failed"
+        # Record the attempt regardless so a failed run does not retry instantly.
+        state[cadence] = now.isoformat()
+        _write_cadence_state(state)
+    for cadence in CADENCE_INTERVALS:
+        if cadence not in results:
+            results[cadence] = "up-to-date"
+    return results
 
 
 def run_auto_analyze_if_enabled() -> None:
@@ -131,8 +196,10 @@ def main() -> int:
         return 0
 
     if args.now:
-        print("Running pipeline once (--now)...")
-        return 0 if run_pipeline_and_clear_cache() else 1
+        print("Running due cadences once (--now)...")
+        results = run_due_cadences()
+        print(" ".join(f"{k}={v}" for k, v in results.items()))
+        return 0
 
     if schedule_time:
         logging.info("Scheduler started; daily at %s (%s).", schedule_time, TZ)
@@ -144,7 +211,7 @@ def main() -> int:
         wait = (nxt - datetime.now(TZ)).total_seconds()
         logging.info("Next run at %s (in %.0f s). Sleeping...", nxt.isoformat(), wait)
         time.sleep(max(wait, 1.0))
-        run_pipeline_and_clear_cache()
+        run_due_cadences()
 
 
 if __name__ == "__main__":

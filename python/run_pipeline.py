@@ -64,28 +64,16 @@ STEPS: list[dict[str, object]] = [
         "desc": "Multi-year financial history from yfinance (added for fundamentals chart)",
     },
     {
-        "name": "news",
-        "script": "scrape_idx_news.py",
-        "args": [],
-        "desc": "IDX news feed (uses real NewsCode for dedup)",
-    },
-    {
-        "name": "news_link",
-        "script": "enrich_news_tickers.py",
-        "args": [],
-        "desc": "Link news articles to known IDX tickers",
-    },
-    {
-        "name": "company_news",
-        "script": "scrape_company_news.py",
-        "args": [],
-        "desc": "Per-ticker Yahoo Finance news (deterministic dedup key)",
-    },
-    {
         "name": "news_brave",
         "script": "scrape_brave_news.py",
         "args": ["--macro"],
         "desc": "Brave macro/economy/politics queries (ticker=NULL, source-filtered)",
+    },
+    {
+        "name": "news_brave_ticker",
+        "script": "scrape_brave_news.py",
+        "args": [],
+        "desc": "Brave per-ticker news (favorites/watchlist; stored with ticker)",
     },
     {
         "name": "news_impacts",
@@ -98,6 +86,12 @@ STEPS: list[dict[str, object]] = [
         "script": "generate_research_candidates.py",
         "args": [],
         "desc": "Deterministic macro -> research candidates + optional LLM interpretation (B5)",
+    },
+    {
+        "name": "research_analyze",
+        "script": "auto_analyze.py",
+        "args": ["--source", "research_candidates"],
+        "desc": "Run comprehensive AI analysis for research-candidate tickers (recency-guarded, capped)",
     },
 ]
 
@@ -195,6 +189,30 @@ def select_steps(steps_arg: str | None) -> tuple[list[dict], list[str]]:
     return selected, unknown
 
 
+# Data-refresh cadence for each step. Different data needs different frequency:
+# prices/news/ratios change daily, yfinance enrichment is rate-limited (weekly),
+# the multi-year financial history backfill is heavy (monthly).
+STEP_CADENCE: dict[str, str] = {
+    "companies": "daily",
+    "prices": "daily",
+    "financial_ratio": "daily",
+    "yfinance": "weekly",
+    "financial_history": "monthly",
+    "news_brave": "daily",
+    "news_brave_ticker": "daily",
+    "news_impacts": "daily",
+    "research_candidates": "daily",
+    "research_analyze": "daily",
+}
+
+
+def select_by_cadence(cadence: str) -> list[dict]:
+    """Return the steps to run for a given cadence ("daily", "weekly", "monthly", "all")."""
+    if cadence == "all":
+        return list(STEPS)
+    return [s for s in STEPS if STEP_CADENCE.get(str(s["name"])) == cadence]
+
+
 def main() -> int:
     _setup_logging()
     parser = argparse.ArgumentParser(description="Run the IDX data pipeline in order")
@@ -203,18 +221,28 @@ def main() -> int:
         "--steps",
         help="Comma-separated subset of step names (e.g. 'prices,news')",
     )
+    parser.add_argument(
+        "--cadence",
+        choices=["daily", "weekly", "monthly", "all"],
+        help="Run steps for a data-refresh cadence (pipeline optional scheduling)",
+    )
     parser.add_argument("--retries", type=int, default=2, help="Retries per failed step")
     parser.add_argument("--delay", type=float, default=1.0, help="Base backoff delay (seconds)")
     parser.add_argument("--backfill", action="store_true", help="Scrape 5y price history each run")
     args = parser.parse_args()
 
-    if not args.all and not args.steps:
-        parser.error("Provide --all or --steps")
+    if not args.all and not args.steps and not args.cadence:
+        parser.error("Provide --all, --steps, or --cadence")
 
     if args.steps:
         selected, unknown = select_steps(args.steps)
         if unknown:
             print(f"Unknown step(s): {', '.join(unknown)}")
+            return 1
+    elif args.cadence:
+        selected = select_by_cadence(args.cadence)
+        if not selected:
+            print(f"No steps for cadence '{args.cadence}'.")
             return 1
     else:
         selected = list(STEPS)

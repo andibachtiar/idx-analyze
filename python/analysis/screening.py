@@ -307,13 +307,33 @@ class StockScreeningEngine:
                 scores.append(0.0)
                 continue
 
-            # Normalize based on filter direction
-            if filter_obj.operator in (ScreenOperator.GREATER_THAN, ScreenOperator.GREATER_EQUAL):
-                # Higher is better
-                normalized = min(value / max(filter_obj.value, 0.01), 2.0)
-            elif filter_obj.operator in (ScreenOperator.LESS_THAN, ScreenOperator.LESS_EQUAL):
-                # Lower is better (invert)
-                normalized = max(0, 2.0 - (value / max(filter_obj.value, 0.01)))
+            op = filter_obj.operator
+            # Normalize each filter to a 0..2 scale where 1.0 is "meets the
+            # threshold exactly". The curve is smooth and non-saturating so a
+            # stock that clears a threshold by a wide margin scores higher than
+            # one that barely clears it (a fixed min(value/threshold, 2.0) cap
+            # made every passing stock look identical, e.g. all technical
+            # screens showed the same 1.667).
+            if op in (ScreenOperator.GREATER_THAN, ScreenOperator.GREATER_EQUAL):
+                base = filter_obj.value
+                if base and base > 0:
+                    normalized = 2.0 * value / (base + value)
+                else:
+                    # Zero threshold (e.g. "price >= SMA200"): rank by the raw
+                    # magnitude so 0.58 above the average beats 0.02.
+                    normalized = min(2.0, 1.0 + value) if value >= 0 else 1.0
+            elif op in (ScreenOperator.LESS_THAN, ScreenOperator.LESS_EQUAL):
+                base = filter_obj.value
+                if base and base > 0:
+                    normalized = 2.0 * base / (base + value)
+                else:
+                    normalized = 2.0
+            elif op in (ScreenOperator.IN_RANGE, ScreenOperator.BETWEEN):
+                lo, hi = filter_obj.value[0], filter_obj.value[1]
+                mid = (lo + hi) / 2.0
+                half = max((hi - lo) / 2.0, 1e-9)
+                closeness = max(0.0, 1.0 - abs(value - mid) / half)
+                normalized = 1.0 + closeness
             else:
                 normalized = 1.0
 

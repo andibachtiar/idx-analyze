@@ -9,6 +9,8 @@ report saved within the last ``min_hours``; if present, skip; otherwise run
 Environment:
     AUTO_ANALYZE_TICKERS   comma-separated override (default: favorites/watchlist)
     AUTO_ANALYZE_MIN_HOURS minimum hours between analyses per ticker (default 24)
+    RESEARCH_ANALYZE_MIN_HOURS min hours between comprehensive candidate analyses
+                           (default 168 = 1 week; source=research_candidates)
     AUTO_ANALYZE_ENABLED   scheduler integration toggle (default "false")
 
 Usage:
@@ -30,6 +32,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 from ai.memory import ResearchMemory, save_research_report
 from ai.researcher import analyze_stock
 from database.scraper_store import ScraperDatabase
+
+# Recency guard defaults (hours). Comprehensive research-candidate analysis is
+# intentionally less frequent (1 week) than the favorites/watchlist check (24h).
+_AUTO_ANALYZE_MIN_HOURS_DEFAULT = 24.0
+_RESEARCH_ANALYZE_MIN_HOURS_DEFAULT = 24.0 * 7  # 1 week
 
 # Fields the research endpoint exposes (see api/main.py _research_report_to_dict).
 _REPORT_FIELDS = [
@@ -90,13 +97,48 @@ def analyze_ticker(
     return {"status": "analyzed", "ticker": ticker.upper(), "path": path}
 
 
-def resolve_tickers() -> list[str]:
-    """Return override env tickers, else favorites/watchlist from PostgreSQL."""
+def resolve_research_candidate_tickers(limit: int | None = None) -> list[str]:
+    """Return distinct non-NULL tickers from the latest research candidates."""
+    with ScraperDatabase() as store:
+        store._ensure_connection()
+        assert store.connection is not None
+        with store.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT ticker
+                FROM research_candidates
+                WHERE ticker IS NOT NULL
+                  AND candidate_date = (SELECT MAX(candidate_date) FROM research_candidates)
+                ORDER BY ticker
+                """
+            )
+            tickers = [row[0] for row in cursor.fetchall()]
+    if limit:
+        tickers = tickers[:limit]
+    return tickers
+
+
+def resolve_tickers(source: str = "favorites", limit: int | None = None) -> list[str]:
+    """Return the ticker list to analyze: --ticker/env override, then by source.
+
+    ``source`` is "favorites" (watchlist) or "research_candidates" (latest
+    deterministic macro candidates). If ``AUTO_ANALYZE_TICKERS`` is set it always
+    takes precedence.
+    """
     env = os.environ.get("AUTO_ANALYZE_TICKERS", "").strip()
     if env:
-        return [t.strip().upper() for t in env.split(",") if t.strip()]
-    with ScraperDatabase() as store:
-        return store.get_favorites()
+        tickers = [t.strip().upper() for t in env.split(",") if t.strip()]
+    elif source == "research_candidates":
+        tickers = resolve_research_candidate_tickers(limit=limit)
+        if not tickers:
+            print("No research candidates with tickers found.")
+            return []
+    else:
+        with ScraperDatabase() as store:
+            tickers = store.get_favorites()
+    if limit:
+        tickers = tickers[:limit]
+    return tickers
 
 
 def run(
@@ -104,17 +146,28 @@ def run(
     min_hours: float | None = None,
     force: bool = False,
     dry_run: bool = False,
+    source: str = "favorites",
 ) -> int:
     """Run auto-analysis over the target tickers. Returns number analyzed."""
     effective_min = min_hours if min_hours is not None else float(
-        os.environ.get("AUTO_ANALYZE_MIN_HOURS", "24")
+        os.environ.get(
+            "RESEARCH_ANALYZE_MIN_HOURS"
+            if source == "research_candidates"
+            else "AUTO_ANALYZE_MIN_HOURS",
+            str(
+                _RESEARCH_ANALYZE_MIN_HOURS_DEFAULT
+                if source == "research_candidates"
+                else _AUTO_ANALYZE_MIN_HOURS_DEFAULT
+            ),
+        )
     )
-    tickers = resolve_tickers()
+    # Cap the number of research-candidate tickers per run to control LLM cost.
+    if source == "research_candidates" and limit is None:
+        limit = int(os.environ.get("RESEARCH_ANALYZE_MAX_TICKERS", "20"))
+    tickers = resolve_tickers(source=source, limit=limit)
     if not tickers:
-        print("No tickers to auto-analyze (set AUTO_ANALYZE_TICKERS or add favorites).")
+        print("No tickers to auto-analyze (set AUTO_ANALYZE_TICKERS, -source research_candidates, or add favorites).")
         return 0
-    if limit:
-        tickers = tickers[:limit]
 
     print(f"Auto-analyzing {len(tickers)} ticker(s) | min_hours={effective_min} | force={force}")
     done = {"analyzed": 0, "skipped": 0}
@@ -135,6 +188,12 @@ def main() -> int:
         description="Auto-analyze tickers periodically (recency-guarded)"
     )
     parser.add_argument("--ticker", action="append", help="Ticker(s) to analyze")
+    parser.add_argument(
+        "--source",
+        choices=["favorites", "research_candidates"],
+        default="favorites",
+        help="Ticker source (default favorites/watchlist; or latest research candidates)",
+    )
     parser.add_argument("--limit", type=int, help="Limit number of tickers")
     parser.add_argument("--min-hours", type=float, help="Recency guard (hours)")
     parser.add_argument("--force", action="store_true", help="Ignore recency guard")
@@ -149,6 +208,7 @@ def main() -> int:
         min_hours=args.min_hours,
         force=args.force,
         dry_run=args.dry_run,
+        source=args.source,
     )
     return 0
 

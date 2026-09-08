@@ -264,8 +264,11 @@ class ScraperDatabase:
         """Update enrichment fields for latest ratio rows.
 
         Enrichment values (e.g. from yfinance) fill in fields the IDX ratios
-        source leaves empty: dividend_yield, current_ratio, payout_ratio, and
-        growth CAGRs (revenue_cagr, earnings_cagr).
+        source leaves empty: dividend_yield, current_ratio, payout_ratio, growth
+        CAGRs (revenue_cagr, earnings_cagr), and the cash-flow/interest
+        components (gross_profit, cash_and_equivalents, interest_expense,
+        operating_cash_flow, capital_expenditures) that let the analysis engine
+        derive gross margin, interest coverage, net debt/EBITDA and FCF margin.
         Only the tagged value columns are updated; other ratio data is kept.
         """
         rows = []
@@ -288,6 +291,11 @@ class ScraperDatabase:
                 _number(item.get("payout_ratio") or item.get("payoutRatio")),
                 _number(item.get("revenue_cagr")),
                 _number(item.get("earnings_cagr")),
+                _number(item.get("gross_profit") or item.get("grossProfit")),
+                _number(item.get("cash_and_equivalents") or item.get("cash")),
+                _number(item.get("interest_expense")),
+                _number(item.get("operating_cash_flow")),
+                _number(item.get("capital_expenditures")),
             ))
         if not rows:
             return 0
@@ -300,9 +308,17 @@ class ScraperDatabase:
                     payout_ratio = data.payout_ratio::numeric,
                     revenue_cagr = data.revenue_cagr::numeric,
                     earnings_cagr = data.earnings_cagr::numeric,
+                    gross_profit = data.gross_profit::numeric,
+                    cash_and_equivalents = data.cash_and_equivalents::numeric,
+                    interest_expense = data.interest_expense::numeric,
+                    operating_cash_flow = data.operating_cash_flow::numeric,
+                    capital_expenditures = data.capital_expenditures::numeric,
                     updated_at = CURRENT_TIMESTAMP
                 FROM (VALUES %s) AS data(ticker, dividend_yield, current_ratio,
-                                         payout_ratio, revenue_cagr, earnings_cagr)
+                                         payout_ratio, revenue_cagr, earnings_cagr,
+                                         gross_profit, cash_and_equivalents,
+                                         interest_expense, operating_cash_flow,
+                                         capital_expenditures)
                 WHERE fr.ticker = data.ticker
                   AND fr.fiscal_year = (
                       SELECT MAX(fiscal_year) FROM financial_ratios f2

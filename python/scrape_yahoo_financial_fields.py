@@ -40,6 +40,53 @@ def _safe_float(value) -> float | None:
         return None
 
 
+def to_idx_units(value) -> float | None:
+    """Convert a raw rupiah monetary value to IDX billions convention.
+
+    ``financial_ratios`` stores revenue/net income in IDR billions (e.g. BBRI
+    2024 revenue ≈ 172124.02), while yfinance exposes raw IDR. We divide by
+    1e9 to keep the IDX convention consistent across all rows.
+    """
+    num = _safe_float(value)
+    return None if num is None else num / 1_000_000_000.0
+
+
+def _latest_vector(frame, row_name: str) -> float | None:
+    """Return the newest annual value for a financial-statement row, or None.
+
+    ``frame`` columns are sorted newest-first; the first non-NaN value is the
+    most recent period's figure.
+    """
+    if frame is None or row_name not in frame.index:
+        return None
+    try:
+        series = frame.loc[row_name]
+    except Exception:
+        return None
+    for v in series:
+        num = _safe_float(v)
+        if num is not None:
+            return num
+    return None
+
+
+_OCF_ROWS = (
+    "Operating Cash Flow",
+    "Total Cash From Operating Activities",
+    "Cash Flowsfromusedin Operating Activities Direct",
+    "Cash Flow From Operating Activities",
+)
+
+
+def _latest_any(frame, row_names) -> float | None:
+    """Return the newest annual value for the first row present in ``row_names``."""
+    for name in row_names:
+        val = _latest_vector(frame, name)
+        if val is not None:
+            return val
+    return None
+
+
 def compute_cagr(financials, row_name: str) -> float | None:
     """Return multi-year CAGR (decimal) for a financial statement row, or None.
 
@@ -73,14 +120,27 @@ def compute_cagr(financials, row_name: str) -> float | None:
 
 
 def fetch_enrichment(yf_ticker: str) -> dict | None:
-    """Return enrichment (dividend/current-ratio) + growth CAGRs for one ticker."""
+    """Return enrichment for one ticker: dividends/current-ratio, growth CAGRs,
+    and the cash-flow / interest components used to derive gross margin,
+    interest coverage, net debt/EBITDA and FCF margin.
+    """
     try:
         ticker = yf.Ticker(yf_ticker)
         info = ticker.info or {}
         financials = ticker.financials
+        balance = ticker.balance_sheet
+        cashflow = ticker.cashflow
     except Exception as exc:  # pragma: no cover - network variance
         print(f"  Fetch failed for {yf_ticker}: {exc}")
         return None
+
+    gross_profit = to_idx_units(_latest_vector(financials, "Gross Profit"))
+    cash = to_idx_units(_latest_vector(balance, "Cash And Cash Equivalents"))
+    interest_expense = to_idx_units(_latest_vector(financials, "Interest Expense"))
+    operating_cash_flow = to_idx_units(_latest_any(cashflow, _OCF_ROWS))
+    # yfinance reports capex as a negative outflow; store the magnitude.
+    capex_raw = _latest_vector(cashflow, "Capital Expenditure")
+    capital_expenditures = to_idx_units(abs(capex_raw)) if capex_raw is not None else None
 
     values = {
         "ticker": to_idx_ticker(yf_ticker),
@@ -89,6 +149,11 @@ def fetch_enrichment(yf_ticker: str) -> dict | None:
         "payout_ratio": info.get("payoutRatio"),
         "revenue_cagr": compute_cagr(financials, "Total Revenue"),
         "earnings_cagr": compute_cagr(financials, "Net Income"),
+        "gross_profit": gross_profit,
+        "cash_and_equivalents": cash,
+        "interest_expense": interest_expense,
+        "operating_cash_flow": operating_cash_flow,
+        "capital_expenditures": capital_expenditures,
     }
     # Only return when at least one value is actually present.
     if all(v is None for k, v in values.items() if k != "ticker"):

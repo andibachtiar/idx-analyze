@@ -45,7 +45,8 @@ def main() -> int:
     parser.add_argument("--top-sectors", type=int, default=int(os.getenv("RESEARCH_CANDIDATES_TOP_SECTORS", "10")))
     parser.add_argument("--min-net", type=float, default=float(os.getenv("RESEARCH_CANDIDATES_MIN_NET", "0.25")))
     parser.add_argument("--use-llm", action="store_true", default=os.getenv("RESEARCH_CANDIDATES_USE_LLM", "").lower() in ("1", "true"))
-    parser.add_argument("--max-tickers", type=int, default=int(os.getenv("RESEARCH_CANDIDATES_MAX_TICKERS_PER_SECTOR", "5")))
+    parser.add_argument("--max-tickers", type=int, default=int(os.getenv("RESEARCH_CANDIDATES_MAX_TICKERS_PER_SECTOR", "8")))
+    parser.add_argument("--ticker-rank", choices=["technical", "liquidity"], default=os.getenv("RESEARCH_CANDIDATES_TICKER_RANK", "technical"))
     parser.add_argument("--baseline-days", type=int, default=int(os.getenv("RESEARCH_CANDIDATES_BASELINE_DAYS", "30")))
     parser.add_argument("--min-sample-days", type=int, default=int(os.getenv("RESEARCH_CANDIDATES_MIN_SAMPLE_DAYS", "5")))
     parser.add_argument("--no-expand", action="store_true", help="Don't expand sector themes to tickers")
@@ -61,6 +62,7 @@ def main() -> int:
         llm_client=llm_client,
         max_tickers_per_sector=args.max_tickers,
         expand_tickers=not args.no_expand,
+        ticker_rank=args.ticker_rank,
         baseline_days=args.baseline_days,
         min_sample_days=args.min_sample_days,
     )

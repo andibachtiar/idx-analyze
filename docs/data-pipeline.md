@@ -35,28 +35,63 @@ uv run python run_pipeline.py --all
 
 Urutan langkah:
 
-| Step                  | Script                             | Fungsi                                                               |
-| --------------------- | ---------------------------------- | -------------------------------------------------------------------- |
-| `companies`           | `scrape_company_profiles.py`       | Master + detail perusahaan (universe untuk FK)                       |
-| `prices`              | `scrape_stock_prices.py`           | Harga OHLCV harian (incremental; hanya tanggal yang hilang)          |
-| `financial_ratio`     | `scrape_financial_ratio.py`        | Rasio keuangan terbaru dari IDX                                      |
-| `yfinance`            | `scrape_yahoo_financial_fields.py` | Enrichment: dividend_yield/current_ratio/payout_ratio/CAGR           |
-| `financial_history`   | `backfill_financial_history.py`    | Riwayat multi-tahun dari yfinance (untuk grafik fundamental)         |
-| `news`                | `scrape_idx_news.py`               | Feed berita IDX (dedup via NewsCode)                                 |
-| `news_link`           | `enrich_news_tickers.py`           | Menautkan berita ke ticker IDX                                       |
-| `company_news`        | `scrape_company_news.py`           | Berita per-ticker dari Yahoo (dedup deterministik SHA-1)             |
-| `news_brave`          | `scrape_brave_news.py --macro`     | Feed makro/ekonomi/politik via Brave (`ticker=NULL`, filter sumber)  |
-| `news_impacts`        | `enrich_news_impacts.py`           | Tag dampak sektor/ticker deterministic (B3)                          |
-| `research_candidates` | `generate_research_candidates.py`  | Kandidat riset deterministic dari snapshot (B5) + LLM interpretation |
+| Step                  | Script                                         | Fungsi                                                                                                                   |
+| --------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `companies`           | `scrape_company_profiles.py`                   | Master + detail perusahaan (universe untuk FK)                                                                           |
+| `prices`              | `scrape_stock_prices.py`                       | Harga OHLCV harian (incremental; hanya tanggal yang hilang)                                                              |
+| `financial_ratio`     | `scrape_financial_ratio.py`                    | Rasio keuangan terbaru dari IDX                                                                                          |
+| `yfinance`            | `scrape_yahoo_financial_fields.py`             | Enrichment: dividend_yield/current_ratio/payout_ratio/CAGR                                                               |
+| `financial_history`   | `backfill_financial_history.py`                | Riwayat multi-tahun dari yfinance (untuk grafik fundamental)                                                             |
+| `news_brave`          | `scrape_brave_news.py --macro`                 | Feed makro/ekonomi/politik via Brave (`ticker=NULL`, filter sumber)                                                      |
+| `news_brave_ticker`   | `scrape_brave_news.py`                         | Berita per-ticker via Brave (favorit/watchlist; `ticker` langsung)                                                       |
+| `news_impacts`        | `enrich_news_impacts.py`                       | Tag dampak sektor/ticker deterministic (B3)                                                                              |
+| `research_candidates` | `generate_research_candidates.py`              | Kandidat riset deterministic dari snapshot (B5) + LLM interpretation                                                     |
+| `research_analyze`    | `auto_analyze.py --source research_candidates` | Analisis menyeluruh (AI) untuk ticker kandidat riset (recency-guarded, capped `RESEARCH_ANALYZE_MAX_TICKERS` default 20) |
+
+> **Sumber berita = Brave saja.** Feed IDX (`scrape_idx_news`) & per-ticker Yahoo
+> (`scrape_company_news`) sudah **tidak lagi** dijalankan pipeline. Berita makro
+> & per-ticker diambil via **Brave Search API** (filter `BRAVE_SOURCES`), per-ticker
+> di-scope ke **favorit/watchlist** (kendali biaya API).
+
+#### Sumber Berita (Brave-only)
+
+Semua berita kini diambil dari **Brave News Search API** lewat dua mode:
+
+| Mode           | Step                            | Query                                                                                        | Ticker di tabel                                         |
+| -------------- | ------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Makro**      | `news_brave` (`--macro`)        | `BRAVE_MACRO_QUERIES` (ekonomi/politik umum, mis. "ekonomi indonesia, ihsg, harga batubara") | `NULL` → dipetakan ke sektor/ticker oleh `news_impacts` |
+| **Per-ticker** | `news_brave_ticker` (tanpa arg) | `{ticker} saham berita`, satu per **favorit/watchlist**                                      | langsung diisi dari ticker yang di-query                |
+
+**Aturan scope:**
+
+- `news_brave_ticker` **hanya favorit/watchlist** — tanpa `--ticker`, ia membaca
+  `store.get_favorites()`. Daftar favorit dikontrol dari UI (kartu favorit / watchlist);
+  pipeline otomatis mengikuti daftar itu.
+- Jika **tidak ada favorit**, step hanya menampilkan pesan dan `return 0` (tidak
+  menggagalkan pipeline) — aman untuk penjadwalan otomatis.
+- Bila ingin menjalankan per-ticker untuk ticker tertentu di luar favorit, jalankan
+  manual: `uv run python scrape_brave_news.py --ticker BBCA --ticker BBRI`.
+
+**Kendali biaya/rate-limit:** per-ticker = 1 request API per ticker favorit per
+siklus. Makro = 1 request per query `BRAVE_MACRO_QUERIES`. Sumber difilter oleh
+`BRAVE_SOURCES` (allowlist domain/publisher); hasil di luar allowlist dibuang
+(daftar publisher yang terbuang ditampilkan agar bisa ditambahkan).
+
+**Ticker per artikel:**
+
+- Per-ticker → `ticker` **eksplisit** dari query (paling andal, tanpa tebakan).
+- Makro → `ticker=NULL`; pelink-an ke sektor/ticker dilakukan **deterministik** oleh
+  `enrich_news_impacts.py` (B3, lexicon keyword → sektor/direksi/confidence), lalu
+  `news_impacts` → `research_candidates` (B5).
 
 ### Alur harian: scraping → interpretasi → kandidat riset
 
 ```
-news_brave (makro) ─┐
-company/news (ticker)─┤→ news_impacts (tag sektor/direksi) → research_candidates
-                     │                                       (sector + affected_tickers)
-                     │
-                     └─ LLM interpretasi bukti yang sama (opsional --use-llm)
+news_brave (makro, ticker=NULL) ─┐
+news_brave_ticker (per-ticker/orang favorit) ─┤→ news_impacts (tag sektor/direksi) → research_candidates
+                                            │                                       (sector + affected_tickers)
+                                            │
+                                            └─ LLM interpretasi bukti yang sama (opsional --use-llm)
 ```
 
 Kandidat **tidak pernah dikarang LLM** (Opsi A): hanya `sector` + `affected_tickers`
@@ -92,6 +127,24 @@ apakah tekanan saat ini _above/at/below_ normal — bukan sekadar angka tanpa
 konteks. Baseline juga membawa **`sample_sufficient`**/ **`baseline_confidence`**
 (min 5 hari): bila kurang, prompt menandai `~` dan meminta LLM menyebut
 perbandingan historis terbatas, agar tidak overstate.
+
+**Pemilihan emiten per sektor (P5):** saat memperluas kandidat sektor ke level
+saham, `RESEARCH_CANDIDATES_TICKER_RANK` memilih cara peringkatnya:
+
+- `technical` (default) — `get_sector_technical_tickers` memilih emiten
+  **teknis terbaik dengan syarat likuiditas minimum**: pertama filter emiten yang
+  likuiditasnya (close × volume) ≥ **persentil 40%** sektor
+  (`RESEARCH_CANDIDATES_LIQUIDITY_PERCENTILE`, default 0.40), lalu peringkat
+  komposit berbobot:
+  - trend (`price_vs_sma_200`) bobot **0.5** — 30% di atas SMA200 = skor 1
+  - RSI sehat (~55) bobot **0.3**
+  - volume ratio bobot **0.2** (2× volume = skor 1)
+- `liquidity` — `get_sector_tickers` memilih emiten **paling likuid** (close × volume).
+- **Pemetaan nama sektor:** lexicon memakai nama Indonesia ("Keuangan") sementara
+  `companies.sector` memakai IDX Inggris ("Financials"); `_sector_names()`
+  menerjemahkan keduanya sehingga ekspansi mencapai anggota sektor sebenarnya
+  (mis. "Keuangan" → 104 Financials, bukan hanya 3 ticker bernama Indonesia).
+- Batas per sektor via `RESEARCH_CANDIDATES_MAX_TICKERS_PER_SECTOR` (default 8).
 
 Jalankan kandidat dengan LLM: `uv run python generate_research_candidates.py --use-llm`
 (atau set `RESEARCH_CANDIDATES_USE_LLM=true` di `.env`).
@@ -130,6 +183,32 @@ Konfigurasi via environment:
 
 Setelah pipeline selesai, `scheduler.py` memanggil `clear_cache()` agar endpoint
 API langsung menyajikan data baru (tidak menunggu TTL).
+
+### Cadence (daily / weekly / monthly) — default otomatis
+
+Tiap step punya **cadence** (frekuensi refresh) yang sesuai karakter datanya.
+Scheduler menjalankan step yang **jatuh tempo** (dilacak via
+`data/scheduler_cadence_state.json`), bukan selalu `--all`:
+
+| Cadence   | Step yang dijalankan                                                                                               | Alasan                            |
+| --------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
+| `daily`   | `companies`, `prices`, `financial_ratio`, `news_brave`, `news_brave_ticker`, `news_impacts`, `research_candidates` | Berita/harga/rasio berubah harian |
+| `weekly`  | `yfinance`                                                                                                         | Rate-limited & mahal (~30 mnt)    |
+| `monthly` | `financial_history`                                                                                                | Backfill multi-tahun, berat       |
+
+Jalankan manual per cadence:
+
+```bash
+uv run python run_pipeline.py --cadence daily
+uv run python run_pipeline.py --cadence weekly
+uv run python run_pipeline.py --cadence monthly
+uv run python run_pipeline.py --cadence all   # semua step (perilaku --all)
+```
+
+`--steps` tetap tersedia untuk subset eksplisit; `--all` = semua step. Default
+`scheduler.py` kini berjalan **per cadence yang jatuh tempo**
+(daily ≥1 hari, weekly ≥7 hari, monthly ≥30 hari), sehingga step berat tidak
+dihambat tiap siklus sementara berita/harga tetap harian.
 
 ### Jadwal & interval tiap scrape
 

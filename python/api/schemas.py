@@ -211,10 +211,12 @@ class HistoricalAnalysisResponse(BaseModel):
 class ScreeningResult(BaseModel):
     """Individual screening result."""
     ticker: str
+    name: Optional[str] = None
     passed: bool
     score: float
     pass_rate: float
     filter_results: Dict[str, Dict[str, Any]]
+    metric_values: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ScreeningResponse(BaseModel):

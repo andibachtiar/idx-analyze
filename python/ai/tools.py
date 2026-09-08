@@ -100,17 +100,30 @@ def _metrics_from_db(ratios: Dict[str, Any]) -> Optional[FinancialMetrics]:
     """
     if not ratios:
         return None
+    net_income = _safe_float(ratios.get("net_income"))
+    eps = _safe_float(ratios.get("eps"))
+    total_equity = _safe_float(ratios.get("total_equity"))
+    # Derive share count from net income / EPS when both are available so
+    # book-value-per-share (and thus P/B) can be computed by the valuation engine.
+    shares_outstanding = (net_income / eps) if (net_income and eps) else None
+    book_value_per_share = (total_equity / shares_outstanding) if (total_equity and shares_outstanding) else None
     return FinancialMetrics(
         revenue=_safe_float(ratios.get("revenue")),
         cost_of_goods_sold=_safe_float(ratios.get("cost_of_goods_sold")),
         gross_profit=_safe_float(ratios.get("gross_profit")),
         operating_income=_safe_float(ratios.get("operating_income")),
-        net_income=_safe_float(ratios.get("net_income")),
-        eps=_safe_float(ratios.get("eps")),
+        net_income=net_income,
+        eps=eps,
         total_assets=_safe_float(ratios.get("total_assets")),
         total_liabilities=_safe_float(ratios.get("total_liabilities")),
-        total_equity=_safe_float(ratios.get("total_equity")),
+        total_equity=total_equity,
         total_debt=_safe_float(ratios.get("total_debt")),
+        cash_and_equivalents=_safe_float(ratios.get("cash_and_equivalents")),
+        interest_expense=_safe_float(ratios.get("interest_expense")),
+        operating_cash_flow=_safe_float(ratios.get("operating_cash_flow")),
+        capital_expenditures=_safe_float(ratios.get("capital_expenditures")),
+        shares_outstanding=shares_outstanding,
+        book_value_per_share=book_value_per_share,
         gross_margin=_as_pct(ratios.get("gross_margin")),
         operating_margin=_as_pct(ratios.get("operating_margin")),
         net_margin=_as_pct(ratios.get("net_margin")),
@@ -431,6 +444,60 @@ def get_technical_analysis(
     return _format_structured_result(result)
 
 
+def _price_near(prices: List[Dict[str, Any]], end_date: Optional[str]) -> Optional[float]:
+    """Return the close price closest to (at or before) ``end_date``."""
+    if not prices or not end_date:
+        return None
+    target = end_date[:10]
+    # Older-than-target closes first (closest before period end wins).
+    before = [p for p in prices if (p.get("date") or "")[:10] <= target]
+    source = before or prices
+    return source[-1].get("close") if source else None
+
+
+def _build_historical_valuations(ticker: str) -> tuple[list | None, list | None]:
+    """Build (period, P/E) and (period, P/B) series from stored history, if possible.
+
+    For each fiscal year with EPS/net_income/total_equity and a close price near
+    the period end:
+      - P/E = price / EPS
+      - shares = net_income / EPS; BVPS = total_equity * EPS / net_income
+        so P/B = price / BVPS = price * net_income / (total_equity * EPS)
+    Deterministic; returns (None, None) when history is too sparse.
+    """
+    loader = get_data_loader()
+    ratios = loader.get_financial_ratio_history(ticker)
+    if not ratios:
+        return None, None
+    # Enough price history to cover the ratio period ends (5 years ≈ 1300 bars).
+    prices = loader.get_price_history(ticker, limit=2600)
+    if not prices:
+        return None, None
+    hist_pe: list[tuple] = []
+    hist_pb: list[tuple] = []
+    for r in ratios:
+        end = r.get("period_end")
+        if not end:
+            continue
+        price = _price_near(prices, end)
+        if price is None or price <= 0:
+            continue
+        label = str(end)[:10]
+        eps = r.get("eps")
+        net_income = r.get("net_income")
+        total_equity = r.get("total_equity")
+        if eps and eps > 0:
+            hist_pe.append((label, round(price / eps, 2)))
+        if (
+            eps and eps > 0
+            and net_income and net_income > 0
+            and total_equity and total_equity > 0
+        ):
+            # P/B = price * net_income / (total_equity * eps)
+            hist_pb.append((label, round(price * net_income / (total_equity * eps), 2)))
+    return (hist_pe if len(hist_pe) >= 2 else None), (hist_pb if len(hist_pb) >= 2 else None)
+
+
 def get_valuation(
     ticker: str,
     price: Optional[float] = None,
@@ -473,9 +540,18 @@ def get_valuation(
             "notes": "Price and/or financial metrics not available. Ensure data is scraped first."
         }
 
-    # Convert tuples to lists for JSON serialization
-    hist_pe = [(d, v) for d, v in historical_pe] if historical_pe else None
-    hist_pb = [(d, v) for d, v in historical_pb] if historical_pb else None
+    # Convert tuples to lists for JSON serialization. When no historical series
+    # is supplied, build one from stored price + EPS/book-value history so the
+    # report's historical_comparison is no longer empty.
+    if historical_pe is None and historical_pb is None:
+        try:
+            hist_pe_built, hist_pb_built = _build_historical_valuations(ticker)
+        except Exception:
+            hist_pe_built, hist_pb_built = None, None
+    else:
+        hist_pe_built, hist_pb_built = historical_pe, historical_pb
+    hist_pe = [(d, v) for d, v in hist_pe_built] if hist_pe_built else None
+    hist_pb = [(d, v) for d, v in hist_pb_built] if hist_pb_built else None
 
     summary = get_valuation_summary(
         price=price,
@@ -727,15 +803,28 @@ def run_screening(
     # Format results
     formatted_results = []
     for stock_result in result.results:
+        # Carry the actual metric values used for this screen so the frontend
+        # can display real numbers (e.g. technical columns) instead of "—".
+        metric_values = {
+            metric_name: stocks.get(stock_result.ticker, {}).get(metric_name)
+            for metric_name in stock_result.filters
+        }
+        # ``close`` is enriched for the technical screen but is not itself a
+        # filter metric, so carry it explicitly for the price column.
+        stock_data = stocks.get(stock_result.ticker, {})
+        if stock_data.get("close") is not None:
+            metric_values["close"] = stock_data["close"]
         formatted_results.append({
             "ticker": stock_result.ticker,
+            "name": stock_result.name,
             "passed": stock_result.passed,
             "score": stock_result.score,
             "pass_rate": stock_result.pass_rate,
             "filter_results": {
                 metric: {"passed": passed, "reason": reason}
                 for metric, (passed, reason) in stock_result.filters.items()
-            }
+            },
+            "metric_values": metric_values,
         })
 
     return {

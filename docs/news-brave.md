@@ -251,6 +251,11 @@ Confidence deterministic: `0.6 + 0.1 * (jumlah signal - 1)`, cap `0.95`.
   `SCRAPE_SCHEDULE_TIME` / `SCRAPE_INTERVAL_HOURS`, lalu `clear_cache()`. Karena
   `--all` sudah memuat `news_brave`/`news_impacts`, berita makro & impact tag ikut
   terjadwal otomatis (lihat `docs/data-pipeline.md` §3).
+- **Fase B5 (per-ticker Brave):** ✅ `news_brave_ticker` kini step pipeline
+  (`scrape_brave_news.py` tanpa arg) — berita **per-ticker** untuk **favorit/watchlist**
+  saja, `ticker` diisi eksplisit dari query. Feed IDX (`scrape_idx_news`) & per-ticker
+  Yahoo (`scrape_company_news`) **tidak lagi** dijalankan pipeline; sumber berita
+  kini **Brave-only** (lihat `docs/data-pipeline.md` §2).
 - **Fase D:** perluas daftar ticker (mis. hasil screen) sesuai kuota.
 - **Fase B4:** ✅ `ai/prompts/macro_impact.py` + endpoint `POST /ai/macro-impact` —
   snapshot/ranking sektor & ticker terdampak **deterministic** dari `news_impacts`;

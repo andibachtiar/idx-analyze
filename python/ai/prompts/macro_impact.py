@@ -323,6 +323,7 @@ def generate_research_candidates(
     llm_client=None,
     max_tickers_per_sector: int = 5,
     expand_tickers: bool = True,
+    ticker_rank: str = "technical",
     baseline_days: int = 30,
     min_sample_days: int = 5,
 ) -> dict[str, Any]:
@@ -330,10 +331,12 @@ def generate_research_candidates(
 
     The candidate list (sector/ticker/direction/confidence/net strength) is
     purely deterministic from news_impacts. When ``expand_tickers`` is True a
-    pressured sector is expanded to its most liquid companies (capped) so the
-    Research tab can offer per-stock analysis. The LLM is only asked for a
-    narrative interpretation of the same evidence; it can never add or remove a
-    candidate. Returns the full snapshot for the pipeline to persist.
+    pressured sector is expanded to its top companies (capped) so the Research
+    tab can offer per-stock analysis. ``ticker_rank`` chooses the ranking used to
+    pick those companies: ``"technical"`` (best technicals: uptrend + healthy RSI
+    + volume) or ``"liquidity"`` (most liquid, close x volume). The LLM is only
+    asked for a narrative interpretation of the same evidence; it can never add
+    or remove a candidate. Returns the full snapshot for the pipeline to persist.
     """
     result = analyze_macro_impacts(
         hours=hours,
@@ -347,10 +350,15 @@ def generate_research_candidates(
     sector_tickers: dict[str, list[str]] = {}
     if expand_tickers:
         loader = get_data_loader()
-        sector_tickers = {
-            s["sector"]: loader.get_sector_tickers(s["sector"], limit=max_tickers_per_sector)
-            for s in result.get("sectors", [])
-        }
+        for s in result.get("sectors", []):
+            if ticker_rank == "liquidity":
+                sector_tickers[s["sector"]] = loader.get_sector_tickers(
+                    s["sector"], limit=max_tickers_per_sector
+                )
+            else:
+                sector_tickers[s["sector"]] = loader.get_sector_technical_tickers(
+                    s["sector"], limit=max_tickers_per_sector
+                )
     result["candidates"] = build_candidates(
         result,
         min_abs_net=min_abs_net,

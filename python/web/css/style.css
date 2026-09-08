@@ -406,6 +406,12 @@ tbody tr:hover {
   color: #fff;
   border-color: var(--accent);
 }
+.preset-desc {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: -0.25rem 0 1rem;
+  min-height: 1.1em;
+}
 .ai-analysis {
   margin-top: 1rem;
   background: var(--surface-1);

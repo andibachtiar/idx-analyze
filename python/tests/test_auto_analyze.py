@@ -89,6 +89,37 @@ class TestReportToDict:
 
 class TestRun:
     def test_dry_run_plans_without_analyzing(self, monkeypatch):
-        monkeypatch.setattr(aa, "resolve_tickers", lambda: ["BBCA", "BBRI"])
+        monkeypatch.setattr(aa, "resolve_tickers", lambda source="favorites", limit=None: ["BBCA", "BBRI"])
         out = aa.run(force=True, dry_run=True)
         assert out == 0
+
+    def test_research_candidates_source(self, monkeypatch):
+        """source=research_candidates uses resolve_research_candidate_tickers."""
+        monkeypatch.setattr(aa, "resolve_research_candidate_tickers", lambda limit=None: ["EMAS", "MINE"])
+        assert aa.resolve_tickers(source="research_candidates") == ["EMAS", "MINE"]
+
+    def test_research_candidates_default_guard_is_one_week(self, monkeypatch):
+        """Comprehensive analysis defaults to a 1-week (168h) recency guard."""
+        monkeypatch.delenv("RESEARCH_ANALYZE_MIN_HOURS", raising=False)
+        monkeypatch.delenv("AUTO_ANALYZE_MIN_HOURS", raising=False)
+        monkeypatch.setattr(aa, "resolve_tickers", lambda source="favorites", limit=None: ["EMAS"])
+        captured = {}
+        monkeypatch.setattr(
+            aa, "analyze_ticker",
+            lambda t, min_hours=0.0, force=False, question="": (captured.__setitem__("min_hours", min_hours), {"status": "analyzed"})[1],
+        )
+        aa.run(source="research_candidates", force=True)
+        assert captured["min_hours"] == 168
+
+    def test_favorites_default_guard_is_24h(self, monkeypatch):
+        """Favorites sensitivity guard stays at 24h by default."""
+        monkeypatch.delenv("RESEARCH_ANALYZE_MIN_HOURS", raising=False)
+        monkeypatch.delenv("AUTO_ANALYZE_MIN_HOURS", raising=False)
+        monkeypatch.setattr(aa, "resolve_tickers", lambda source="favorites", limit=None: ["BBCA"])
+        captured = {}
+        monkeypatch.setattr(
+            aa, "analyze_ticker",
+            lambda t, min_hours=0.0, force=False, question="": (captured.__setitem__("min_hours", min_hours), {"status": "analyzed"})[1],
+        )
+        aa.run(source="favorites", force=True)
+        assert captured["min_hours"] == 24

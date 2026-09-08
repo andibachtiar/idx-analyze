@@ -202,6 +202,128 @@ class AIResearcher:
 
         return "\n".join(context_parts)
 
+    def _fill_news_sections(self, report: ResearchReport, news_data: Optional[Dict[str, Any]]) -> None:
+        """Populate ``recent_events``/``risks`` from real news, deterministically.
+
+        The LLM is free to interpret news, but the report must never present an
+        empty section when actual news exists. Facts come from the news rows;
+        this only formats them (event classifier + sentiment/keyword risk tags)
+        and never invents headlines.
+        """
+        news = (news_data or {}).get("news") or []
+        if not news:
+            return
+
+        if not getattr(report, "recent_events", ""):
+            events = []
+            try:
+                from events import classif_news_records
+                events = classif_news_records(news)
+            except Exception:
+                events = []
+            if events:
+                lines = []
+                for ev in events[:8]:
+                    date = (ev.get("published_at") or "")[:10]
+                    etype = ev.get("event_type") or "event"
+                    lines.append(
+                        f"- **{etype}** ({date}): {ev.get('title','')} — {ev.get('source','')}"
+                    )
+            else:
+                lines = [
+                    f"- ({str(n.get('published_at',''))[:10]}) {n.get('title','')} — {n.get('source','')}"
+                    for n in news[:8]
+                    if n.get("title")
+                ]
+            if lines:
+                report.recent_events = "\n".join(lines)
+
+        if not getattr(report, "risks", ""):
+            risk_keywords = (
+                "penurunan", "turun", "rugi", "kerugian", "hutang", "gugatan",
+                "sanksi", "pemecatan", "delisting", "suspend", "warning",
+                "probe", "investigasi", "krisis", "default", "gagal bayar",
+            )
+            risk_lines = []
+            for n in news:
+                text = ((n.get("title") or "") + " " + (n.get("content") or "")).lower()
+                sent = n.get("sentiment", n.get("sentiment_score"))
+                if (sent is not None and sent < 0) or any(
+                    k in text for k in risk_keywords
+                ):
+                    risk_lines.append(
+                        f"- ({str(n.get('published_at',''))[:10]}) {n.get('title','')} — {n.get('source','')}"
+                    )
+            if risk_lines:
+                report.risks = "\n".join(risk_lines[:8])
+
+    def _fill_business_quality(self, report: ResearchReport, fundamental_data: Optional[Dict[str, Any]]) -> None:
+        """Synthesize ``business_quality`` from deterministic fundamentals.
+
+        The LLM may leave this section empty; this fills it from the computed
+        profitability/health metrics (never invented). Margins/ROE/ROA/ROIC are
+        decimals (0.20 = 20%), D/E and current-ratio are ratios.
+        """
+        if getattr(report, "business_quality", ""):
+            return
+        profitability = (fundamental_data or {}).get("profitability") or {}
+        health = (fundamental_data or {}).get("financial_health") or {}
+
+        def val(section, key) -> float | None:
+            entry = (section or {}).get(key) or {}
+            return entry.get("value") if entry.get("is_available") else None
+
+        roe = val(profitability, "roe")
+        roa = val(profitability, "roa")
+        roic = val(profitability, "roic")
+        net_margin = val(profitability, "net_margin")
+        operating_margin = val(profitability, "operating_margin")
+        gross_margin = val(profitability, "gross_margin")
+        d_e = val(health, "debt_to_equity")
+        current = val(health, "current_ratio")
+
+        if roe is None and roa is None and d_e is None and current is None:
+            return
+
+        def pct(x):
+            return f"{x * 100:.1f}%" if isinstance(x, (int, float)) else "—"
+
+        rows = []
+        if roe is not None:
+            label = "Kuat" if roe >= 0.15 else ("Moderat" if roe >= 0.08 else "Lemah")
+            rows.append(("Profitabilitas (ROE)", pct(roe), label))
+        if roa is not None:
+            rows.append(("Return on Assets", pct(roa), "Baik" if roa >= 0.05 else ("Cukup" if roa >= 0.02 else "Rendah")))
+        if roic is not None:
+            rows.append(("ROIC", pct(roic), "Baik" if roic >= 0.12 else ("Cukup" if roic >= 0.06 else "Rendah")))
+        if net_margin is not None:
+            rows.append(("Net Margin", pct(net_margin), "Sehat" if net_margin >= 0.10 else ("Moderat" if net_margin >= 0.04 else "Tipis")))
+        if operating_margin is not None:
+            rows.append(("Operating Margin", pct(operating_margin), "Sehat" if operating_margin >= 0.12 else ("Moderat" if operating_margin >= 0.05 else "Tipis")))
+        if gross_margin is not None:
+            rows.append(("Gross Margin", pct(gross_margin), "Sehat" if gross_margin >= 0.30 else ("Moderat" if gross_margin >= 0.15 else "Tipis")))
+        if d_e is not None:
+            label = "Konservatif" if d_e <= 1.0 else ("Moderat" if d_e <= 2.0 else "Agresif")
+            rows.append(("Leverage (D/E)", f"{d_e:.2f}×", label))
+        if current is not None:
+            label = "Sangat likuid" if current >= 1.5 else ("Cukup" if current >= 1.0 else "Ketat")
+            rows.append(("Likuiditas (Current Ratio)", f"{current:.2f}×", label))
+
+        table = ["| Dimensi | Nilai | Penilaian |", "|---|---|---| "]
+        table += [f"| {a} | {b} | {c} |" for a, b, c in rows]
+
+        notes = []
+        if roe is not None: notes.append(f"ROE {pct(roe)}")
+        if roic is not None: notes.append(f"ROIC {pct(roic)}")
+        if d_e is not None: notes.append(f"D/E {d_e:.2f}×")
+        if current is not None: notes.append(f"current ratio {current:.2f}×")
+        conclusion = (
+            "Kualitas bisnis disintesis dari metrik deterministik. "
+            + (", ".join(notes) if notes else "terbatas karena metrik yang tersedia")
+            + "."
+        )
+        report.business_quality = "\n".join(table) + "\n\n**Kesimpulan:** " + conclusion
+
     def _call_llm(self, messages: List[Dict[str, str]]) -> str:
         """
         Call LLM with messages and return response.
@@ -347,6 +469,15 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         # Parse response into report sections
         report = self._parse_report_response(ticker, question, llm_response)
 
+        # Deterministically fill recent_events/risks from real news so the
+        # report never shows empty sections when news exists (facts from data,
+        # not invented by the LLM).
+        self._fill_news_sections(report, news_data)
+
+        # Fill business_quality from deterministic fundamentals when the LLM
+        # left it empty.
+        self._fill_business_quality(report, fundamental_data)
+
         # Add metadata
         report.data_sources = [
             "fundamental_analysis",
@@ -354,6 +485,8 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
             "technical_analysis",
             "price_data",
         ]
+        if news_data and news_data.get("news"):
+            report.data_sources.append("company_news")
         if include_history:
             report.data_sources.append("historical_analysis")
 

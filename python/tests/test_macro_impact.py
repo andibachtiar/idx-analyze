@@ -264,8 +264,27 @@ class TestBuildCandidates:
                  "ticker": None, "title": "t", "url": "u"}
             ],
         )
-        fake_loader = type("L", (), {"get_sector_tickers": lambda self, s, limit=5: ["BBCA", "BBRI"]})()
+        fake_loader = type("L", (), {"get_sector_tickers": lambda self, s, limit=5: ["BBCA", "BBRI"], "get_sector_technical_tickers": lambda self, s, limit=5: ["BBCA"]})()
         monkeypatch.setattr(mi, "get_data_loader", lambda: fake_loader)
-        out = mi.generate_research_candidates(use_llm=False, max_tickers_per_sector=2)
+        out = mi.generate_research_candidates(use_llm=False, max_tickers_per_sector=2, ticker_rank="liquidity")
         keu_tickers = [c["ticker"] for c in out["candidates"] if c.get("ticker")]
         assert set(keu_tickers) == {"BBCA", "BBRI"}
+
+    def test_generate_uses_technical_tickers_by_default(self, monkeypatch):
+        """Default ticker_rank=technical should expand via get_sector_technical_tickers."""
+        monkeypatch.setattr(
+            mi,
+            "load_impacts",
+            lambda hours=48, limit=200: [
+                {"sector": "Keuangan", "direction": "positive", "confidence": 0.8,
+                 "ticker": None, "title": "t", "url": "u"}
+            ],
+        )
+        fake_loader = type("L", (), {
+            "get_sector_tickers": lambda self, s, limit=5: ["BBCA", "BBRI"],
+            "get_sector_technical_tickers": lambda self, s, limit=5: ["BMRI"],
+        })()
+        monkeypatch.setattr(mi, "get_data_loader", lambda: fake_loader)
+        out = mi.generate_research_candidates(use_llm=False, max_tickers_per_sector=5)
+        keu_tickers = [c["ticker"] for c in out["candidates"] if c.get("ticker")]
+        assert "BMRI" in keu_tickers and "BBCA" not in keu_tickers
