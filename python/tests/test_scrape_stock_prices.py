@@ -503,6 +503,31 @@ class TestUpdateFinancialEnrichments:
         assert "0.1" in update_sql  # revenue_cagr kept as decimal
         assert "0.12" in update_sql
 
+    def test_updates_operating_income(self):
+        store, fake_cursor = _make_store_with_fake_connection()
+        count = store.update_financial_enrichments(
+            [{"ticker": "BMRI", "operating_income": 51234.0, "interest_expense": 49211.664}]
+        )
+        assert count == 1
+        statements = _executed_statements(fake_cursor)
+        update_sql = next(s for s in statements if "UPDATE financial_ratios" in s)
+        assert "operating_income = data.operating_income::numeric" in update_sql
+        assert "interest_expense = data.interest_expense::numeric" in update_sql
+        assert "51234.0" in update_sql
+
+    def test_updates_eps_cagr(self):
+        store, fake_cursor = _make_store_with_fake_connection()
+        count = store.update_financial_enrichments(
+            [{"ticker": "BBCA", "revenue_cagr": 0.10, "earnings_cagr": 0.12, "eps_cagr": 0.09}]
+        )
+        assert count == 1
+        statements = _executed_statements(fake_cursor)
+        update_sql = next(s for s in statements if "UPDATE financial_ratios" in s)
+        assert "eps_cagr = data.eps_cagr::numeric" in update_sql
+        assert "0.09" in update_sql
+        # the VALUES column list includes eps_cagr
+        assert "eps_cagr" in update_sql
+
     def test_skips_missing_ticker(self):
         store, _ = _make_store_with_fake_connection()
         assert store.update_financial_enrichments(

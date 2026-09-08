@@ -61,15 +61,21 @@ def _hours_since(iso: str | None) -> float | None:
 
 
 def report_to_dict(report) -> dict:
-    """Convert a ``ResearchReport`` object to the dict persisted in memory."""
+    """Convert a ``ResearchReport`` object to the dict persisted in memory.
+
+    Produces the same ``sections``-based structure as the API's
+    ``_research_report_to_dict`` so the research tab renders content the same
+    way regardless of whether the report came from the endpoint or the pipeline.
+    """
     result = {
         "ticker": report.ticker,
         "question": getattr(report, "question", ""),
         "generated_at": (getattr(report, "timestamp", None) or datetime.now()).isoformat(),
         "confidence_score": getattr(report, "confidence", None),
+        "overall_verdict": getattr(report, "overall_verdict", ""),
+        "claim_summary": {"FACT": 0, "INTERPRETATION": 0, "ASSUMPTION": 0, "SPECULATION": 0},
+        "sections": {field: getattr(report, field, "") for field in _REPORT_FIELDS},
     }
-    for field in _REPORT_FIELDS:
-        result[field] = getattr(report, field, "")
     return result
 
 
@@ -93,7 +99,26 @@ def analyze_ticker(
 
     report = analyze_stock(ticker, question=question)
     result = report_to_dict(report) if hasattr(report, "ticker") else report
+    # Attach a deterministic validator score so saved reports carry their own
+    # quality audit (Phase 18k) — visible in research history and rankable.
+    try:
+        from ai.prompts.validator import enrich_with_validator
+
+        result = enrich_with_validator(result)
+    except Exception as e:
+        print(f"Validator enrichment skipped for {ticker}: {e}")
     path = save_research_report(ticker, result, question=question)
+    # Stamp the deterministic validator score onto any research_candidate rows
+    # for this ticker so the Research tab can rank candidates by validity.
+    try:
+        with ScraperDatabase() as store:
+            store.update_candidate_validity(
+                ticker,
+                result.get("validator_total"),
+                result.get("validator_tier", ""),
+            )
+    except Exception as e:
+        print(f"Candidate validity stamp skipped for {ticker}: {e}")
     return {"status": "analyzed", "ticker": ticker.upper(), "path": path}
 
 

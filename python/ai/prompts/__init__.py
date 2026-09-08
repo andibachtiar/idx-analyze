@@ -140,6 +140,13 @@ REPORT_TEMPLATE = """
 # =============================================================================
 # TECHNICAL ANALYSIS PROMPTS (from prompts/technical.py)
 # =============================================================================
+from .dividend import (
+    analyze_dividend,
+    dividend_ratios,
+    generate_dividend_prompt,
+    safety_score,
+    yield_trap_check,
+)
 from .financial_report import (
     DocumentInfo,
     FinancialHealth,
@@ -193,6 +200,14 @@ from .technical import (
     analyze_stock_technicals,
     generate_technical_prompt,
     get_technical_analysis_with_llm,
+)
+from .validator import (
+    analyze_validator,
+    confidence_tier,
+    enrich_with_validator,
+    generate_validator_prompt,
+    validate_analysis,
+    validate_report,
 )
 from .valuation import (
     ValuationResult,
@@ -249,6 +264,19 @@ __all__ = [
     "ManagementCredibility",
     "analyze_financial_report",
     "generate_financial_report_prompt",
+    # Dividend Analysis
+    "analyze_dividend",
+    "dividend_ratios",
+    "generate_dividend_prompt",
+    "safety_score",
+    "yield_trap_check",
+    # Result Validator
+    "analyze_validator",
+    "confidence_tier",
+    "generate_validator_prompt",
+    "validate_analysis",
+    "validate_report",
+    "enrich_with_validator",
     # Catalyst Calendar
     "CatalystEvent",
     "CatalystCalendarResult",

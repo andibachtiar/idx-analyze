@@ -108,6 +108,111 @@ class TestDashboardEndpoints:
         assert data["stocks"][0]["ticker"] == "BBCA"
         assert data["stocks"][0]["change_pct"] == 2.04
 
+    def test_stocks_pagination(self, client, monkeypatch):
+        """Test GET /stocks?page&limit slices the list and reports total/pages."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.list_stocks.return_value = [
+            {"ticker": f"T{i}", "name": f"Name {i}", "close": float(i)}
+            for i in range(1, 6)
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/stocks?page=2&limit=2")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 5
+        assert data["pages"] == 3
+        assert data["page"] == 2
+        assert data["limit"] == 2
+        assert data["count"] == 2
+        # page 2 of 2-per-page -> T3, T4
+        assert [s["ticker"] for s in data["stocks"]] == ["T3", "T4"]
+
+    def test_stocks_pagination_default_full(self, client, monkeypatch):
+        """Without limit, GET /stocks returns the full list (backward compat)."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.list_stocks.return_value = [
+            {"ticker": f"T{i}", "name": f"Name {i}", "close": float(i)}
+            for i in range(1, 6)
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/stocks")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 5
+        assert data["count"] == 5
+        assert data["pages"] == 1
+
+    def test_stocks_filter_and_sort(self, client, monkeypatch):
+        """GET /stocks supports q/sector filter and sort/dir."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.list_stocks.return_value = [
+            {"ticker": "BBCA", "name": "Bank Central Asia", "sector": "Keuangan", "close": 100.0, "change_pct": 2.0},
+            {"ticker": "ASII", "name": "Astra", "sector": "Industri", "close": 50.0, "change_pct": -1.0},
+            {"ticker": "BBRI", "name": "Bank Rakyat", "sector": "Keuangan", "close": 80.0, "change_pct": 3.0},
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        # sector filter
+        r = client.get("/stocks?sector=Keuangan")
+        assert [s["ticker"] for s in r.json()["stocks"]] == ["BBCA", "BBRI"]
+        # q filter (ticker substring)
+        r = client.get("/stocks?q=BBCA")
+        assert [s["ticker"] for s in r.json()["stocks"]] == ["BBCA"]
+        # sort by close ascending
+        r = client.get("/stocks?sort=close&dir=asc")
+        assert [s["ticker"] for s in r.json()["stocks"]] == ["ASII", "BBRI", "BBCA"]
+
+    def test_stocks_meta(self, client, monkeypatch):
+        """GET /stocks/meta returns aggregate stats + sectors."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.list_stocks.return_value = [
+            {"ticker": "BBCA", "sector": "Keuangan", "close": 100.0, "change": 2.0},
+            {"ticker": "ASII", "sector": "Industri", "close": 50.0, "change": -1.0},
+            {"ticker": "BBRI", "sector": "Keuangan", "close": None, "change": None},
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/stocks/meta")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 3
+        assert data["priced"] == 2
+        assert data["advancers"] == 1
+        assert data["decliners"] == 1
+        assert data["sectors"] == ["Industri", "Keuangan"]
+
+    def test_stocks_quote_batch(self, client, monkeypatch):
+        """GET /stocks/quote returns only the requested tickers."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.list_stocks.return_value = [
+            {"ticker": "BBCA", "name": "Bank", "sector": "Keuangan", "close": 100.0, "change_pct": 2.0},
+            {"ticker": "ASII", "name": "Astra", "sector": "Industri", "close": 50.0, "change_pct": -1.0},
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/stocks/quote?tickers=BBCA")
+        assert response.status_code == 200
+        quotes = response.json()["quotes"]
+        assert set(quotes.keys()) == {"BBCA"}
+        assert quotes["BBCA"]["close"] == 100.0
+
+    def test_stocks_index(self, client, monkeypatch):
+        """GET /stocks/index returns lightweight rows for search."""
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.list_stocks.return_value = [
+            {"ticker": "BBCA", "name": "Bank Central Asia", "sector": "Keuangan", "close": 100.0},
+            {"ticker": "BBRI", "name": "Bank Rakyat", "sector": "Keuangan", "close": 80.0},
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/stocks/index?q=Bank")
+        assert response.status_code == 200
+        rows = response.json()["rows"]
+        assert [r["ticker"] for r in rows] == ["BBCA", "BBRI"]
+        assert all("close" not in r for r in rows)
+
     def test_price_history(self, client, monkeypatch):
         """Test GET /stocks/{ticker}/prices returns ordered series."""
         from unittest.mock import MagicMock
@@ -169,6 +274,12 @@ class TestDashboardEndpoints:
             "count": 2,
         }
         monkeypatch.setattr("api.main.run_screening", MagicMock(return_value=screen_result))
+        # Isolate persistence: avoid a real DB write during the test.
+        fake_store = MagicMock()
+        fake_store.save_screen_analysis.return_value = 99
+        fake_store.__enter__.return_value = fake_store
+        fake_store.__exit__.return_value = False
+        monkeypatch.setattr("database.scraper_store.ScraperDatabase", MagicMock(return_value=fake_store))
         response = client.post("/ai/screen-analysis", json={"screen_type": "growth", "top_n": 10})
         assert response.status_code == 200
         data = response.json()
@@ -176,6 +287,25 @@ class TestDashboardEndpoints:
         assert data["passed"] == 1
         assert data["results"][0]["ticker"] == "BBCA"
         assert "llm_analysis" in data
+        assert data["analysis_id"] == 99
+
+    def test_screen_analysis_history(self, client, monkeypatch):
+        """Test GET /ai/screen-analysis/history returns saved analyses."""
+        from unittest.mock import MagicMock
+        fake_store = MagicMock()
+        fake_store.get_screen_analyses.return_value = [
+            {"id": 1, "screen_type": "growth", "created_at": "2026-09-08T10:00:00",
+             "llm_analysis": "**Summary**", "tickers": ["BBCA"], "results": [], "filters": []},
+        ]
+        fake_store.__enter__.return_value = fake_store
+        fake_store.__exit__.return_value = False
+        monkeypatch.setattr("database.scraper_store.ScraperDatabase", MagicMock(return_value=fake_store))
+        response = client.get("/ai/screen-analysis/history?limit=5")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        assert data["analyses"][0]["screen_type"] == "growth"
+        assert "Summary" in data["analyses"][0]["llm_analysis"]
 
     def test_research_history(self, client, monkeypatch):
         """Test GET /stocks/{ticker}/research-history returns saved reports."""
@@ -217,6 +347,67 @@ class TestDashboardEndpoints:
         assert data["key_ratios"]["pe_ratio"] == 10.11
         assert data["score"] > 0
         assert data["signal"] in ("BULLISH", "NEUTRAL", "BEARISH")
+
+    def test_research_candidates_rank_validity(self, client, monkeypatch):
+        """Test GET /research/candidates?rank=validity passes rank + validator fields."""
+        from unittest.mock import MagicMock
+
+        loader = MagicMock()
+        loader.get_research_candidates.return_value = [
+            {
+                "candidate_date": "2026-09-08",
+                "sector": "Keuangan",
+                "ticker": "BBCA",
+                "direction": "positive",
+                "confidence": 0.6,
+                "net_strength": 2.5,
+                "reason": "Macro tailwind",
+                "status": "pending",
+                "validator_score": 82.0,
+                "validator_tier": "HIGH",
+            }
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/research/candidates?rank=validity")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["rank"] == "validity"
+        assert len(data["candidates"]) == 1
+        call_kwargs = loader.get_research_candidates.call_args.kwargs
+        assert call_kwargs.get("rank") == "validity"
+        cand = data["candidates"][0]
+        assert cand["validator_score"] == 82.0
+        assert cand["validator_tier"] == "HIGH"
+
+    def test_research_candidates_filter_bullish_validity(self, client, monkeypatch):
+        """Test GET /research/candidates?filter=bullish_validity passes filter + min_validity."""
+        from unittest.mock import MagicMock
+
+        loader = MagicMock()
+        loader.get_research_candidates.return_value = [
+            {
+                "candidate_date": "2026-09-08",
+                "sector": "Energi",
+                "ticker": "ADRO",
+                "direction": "positive",
+                "confidence": 0.7,
+                "net_strength": 3.0,
+                "reason": "Energy rally",
+                "status": "pending",
+                "validator_score": 76.0,
+                "validator_tier": "HIGH",
+            }
+        ]
+        monkeypatch.setattr("ai.data_loader_pg.get_data_loader", MagicMock(return_value=loader))
+        response = client.get("/research/candidates?filter=bullish_validity&min_validity=70")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["filter"] == "bullish_validity"
+        assert data["min_validity"] == 70.0
+        call_kwargs = loader.get_research_candidates.call_args.kwargs
+        assert call_kwargs.get("filter") == "bullish_validity"
+        assert call_kwargs.get("min_validity") == 70.0
+        assert data["candidates"][0]["validator_score"] == 76.0
 
     def test_web_interface_serves_html(self, client):
         """Test GET / serves the dashboard HTML."""
@@ -444,12 +635,20 @@ class TestFavoritesEndpoints:
 class TestAIEndpoints:
     """Tests for AI research endpoints."""
 
-    def test_ai_analyze_stock(self, client):
+    def test_ai_analyze_stock(self, client, monkeypatch):
         """Test AI stock analysis endpoint."""
         from datetime import datetime
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
         from ai.researcher import ResearchReport
+
+        # The endpoint now stamps the validator score onto research_candidates,
+        # so isolate the DB write (otherwise it opens a real connection).
+        fake_store = MagicMock()
+        fake_store.update_candidate_validity.return_value = 0
+        fake_store.__enter__.return_value = fake_store
+        fake_store.__exit__.return_value = False
+        monkeypatch.setattr("api.main.ScraperDatabase", MagicMock(return_value=fake_store))
 
         # Create a mock report with all required attributes
         mock_report = ResearchReport(

@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import time
 
 import yfinance as yf
@@ -35,9 +36,10 @@ def _safe_float(value) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        num = float(value)
     except (TypeError, ValueError):
         return None
+    return None if math.isnan(num) or math.isinf(num) else num
 
 
 def to_idx_units(value) -> float | None:
@@ -77,6 +79,22 @@ _OCF_ROWS = (
     "Cash Flow From Operating Activities",
 )
 
+# Row names that hold pre-tax operating profit, in preference order. The exact
+# label varies between issuers (and versions of yfinance's statements).
+_OI_ROWS = (
+    "Operating Income",
+    "EBIT",
+    "Operating Income (Loss)",
+)
+
+# Sourced from the income statement only when an explicit Operating Income / EBIT
+# row is absent (most common for banks), so the engine can still derive operating
+# margin, net debt/EBITDA and interest coverage deterministically.
+_OPEX_ROWS = (
+    "Operating Expense",
+    "Total Operating Expenses",
+)
+
 
 def _latest_any(frame, row_names) -> float | None:
     """Return the newest annual value for the first row present in ``row_names``."""
@@ -90,29 +108,31 @@ def _latest_any(frame, row_names) -> float | None:
 def compute_cagr(financials, row_name: str) -> float | None:
     """Return multi-year CAGR (decimal) for a financial statement row, or None.
 
-    yfinance ``financials`` columns are sorted newest-first. We use the oldest
-    and newest annual values and compute (end/start)^(1/years) - 1.
+    yfinance ``financials`` columns are sorted newest-first. Decades of columns
+    may contain NaN for a period that was not reported; we treat them as
+    missing (dropped for the value) but keep the number of years implied by the
+    column count, so a ``[121, NaN, 100]`` series still spans 2 years and yields
+    ``(121/100)**(1/2) - 1``.
     """
     if financials is None or row_name not in financials.index:
         return None
     try:
-        series = financials.loc[row_name]
+        series = list(financials.loc[row_name])
     except Exception:
         return None
-    values = [
-        _safe_float(v)
-        for v in series
-        if v is not None and _safe_float(v) is not None
-    ]
-    if len(values) < 2:
+    if len(series) < 2:
         return None
-    # values follow column order (newest -> oldest); reverse to oldest -> newest.
-    values.reverse()
-    start = values[0]
-    end = values[-1]
-    if start <= 0 or end <= 0:
+    years = max(len(series) - 1, 1)
+    # Drop NaN/Inf but preserve the newest->oldest ordering, then flip to arrange
+    # oldest -> newest so ``start``/``end`` are the true period boundaries.
+    clean = [v for v in series if _safe_float(v) is not None]
+    if len(clean) < 2:
         return None
-    years = max(len(values) - 1, 1)
+    clean.reverse()
+    start = _safe_float(clean[0])
+    end = _safe_float(clean[-1])
+    if start is None or end is None or start <= 0 or end <= 0:
+        return None
     try:
         return (end / start) ** (1.0 / years) - 1.0
     except (ValueError, ZeroDivisionError):
@@ -142,6 +162,19 @@ def fetch_enrichment(yf_ticker: str) -> dict | None:
     capex_raw = _latest_vector(cashflow, "Capital Expenditure")
     capital_expenditures = to_idx_units(abs(capex_raw)) if capex_raw is not None else None
 
+    # Operating income: prefer the explicit Operating Income / EBIT row; otherwise
+    # derive Revenue - Operating Expense (banks often omit the explicit row). The
+    # value is stored in IDX billions so it is comparable with the other rows.
+    operating_income = None
+    revenue_raw = _latest_vector(financials, "Total Revenue")
+    oi_raw = _latest_any(financials, _OI_ROWS)
+    if oi_raw is not None:
+        operating_income = to_idx_units(oi_raw)
+    else:
+        opex_raw = _latest_any(financials, _OPEX_ROWS)
+        if revenue_raw is not None and opex_raw is not None:
+            operating_income = to_idx_units(revenue_raw - opex_raw)
+
     values = {
         "ticker": to_idx_ticker(yf_ticker),
         "dividend_yield": info.get("dividendYield"),
@@ -149,7 +182,9 @@ def fetch_enrichment(yf_ticker: str) -> dict | None:
         "payout_ratio": info.get("payoutRatio"),
         "revenue_cagr": compute_cagr(financials, "Total Revenue"),
         "earnings_cagr": compute_cagr(financials, "Net Income"),
+        "eps_cagr": compute_cagr(financials, "Diluted EPS"),
         "gross_profit": gross_profit,
+        "operating_income": operating_income,
         "cash_and_equivalents": cash,
         "interest_expense": interest_expense,
         "operating_cash_flow": operating_cash_flow,

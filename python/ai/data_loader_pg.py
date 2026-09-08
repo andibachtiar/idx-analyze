@@ -657,6 +657,9 @@ class PostgreSQLDataLoader:
         limit: int = 50,
         ticker: Optional[str] = None,
         sector: Optional[str] = None,
+        rank: str = "",
+        filter: str = "",
+        min_validity: float = 70.0,
     ) -> List[Dict[str, Any]]:
         """Return deterministic research candidates (Fase B5) within ``hours``.
 
@@ -664,13 +667,21 @@ class PostgreSQLDataLoader:
         news_impacts snapshot. When ``ticker`` and/or ``sector`` are supplied the
         list is filtered to candidates that match that ticker directly or belong
         to that sector (so a stock's Research tab only shows its own industry).
-        The daily ``llm_interpretation`` is carried on each row.
+        The daily ``llm_interpretation`` is carried on each row. When ``rank`` is
+        ``validity`` the list is ordered by the deterministic validator score
+        (descending, unscored rows last) so the Research tab can prioritise the
+        highest-quality analyses. When ``filter`` is ``bullish_validity`` only
+        ticker-level rows that are bullish (``direction='positive'``) AND have a
+        validator score at/above ``min_validity`` (default HIGH=70) are returned,
+        so the frontend can separate the strongest, well-supported ideas from
+        bearish / unscored ones.
         """
         try:
             conn = self._get_connection()
             query = (
                 "SELECT candidate_date, sector, ticker, direction, confidence, "
-                "net_strength, reason, status, llm_interpretation "
+                "net_strength, reason, status, llm_interpretation, "
+                "validator_score, validator_tier "
                 "FROM research_candidates "
                 "WHERE candidate_date >= CURRENT_DATE - CONCAT(%s, ' hours')::interval "
             )
@@ -686,10 +697,24 @@ class PostgreSQLDataLoader:
             elif sector:
                 query += "AND sector = %s "
                 params.append(sector)
-            query += (
-                "ORDER BY candidate_date DESC, ABS(net_strength) DESC, sector ASC "
-                "LIMIT %s"
-            )
+            if filter == "bullish_validity":
+                query += (
+                    "AND ticker IS NOT NULL "
+                    "AND direction = 'positive' "
+                    "AND validator_score >= %s "
+                )
+                params.append(min_validity)
+            if rank == "validity":
+                query += (
+                    "ORDER BY candidate_date DESC, "
+                    "validator_score DESC NULLS LAST, "
+                    "ABS(net_strength) DESC, sector ASC "
+                )
+            else:
+                query += (
+                    "ORDER BY candidate_date DESC, ABS(net_strength) DESC, sector ASC "
+                )
+            query += "LIMIT %s"
             params.append(limit)
             with conn.cursor() as cur:
                 cur.execute(query, params)
@@ -705,6 +730,8 @@ class PostgreSQLDataLoader:
                         "reason": r["reason"],
                         "status": r["status"],
                         "llm_interpretation": r["llm_interpretation"],
+                        "validator_score": float(r["validator_score"]) if r["validator_score"] is not None else None,
+                        "validator_tier": r["validator_tier"],
                     }
                     for r in rows
                 ]

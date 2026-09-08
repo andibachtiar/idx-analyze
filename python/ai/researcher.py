@@ -384,6 +384,81 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
 3. Review the structured data from tool outputs directly
 """
 
+    @staticmethod
+    def _count_available(section: Dict[str, Any]) -> tuple[int, int]:
+        """Count (available, total) metric entries in a result section.
+
+        Entries are typically ``{"value": ..., "is_available": ...}``;
+        ``is_available`` is authoritative but a non-None value is accepted for
+        robustness (older results may omit the flag).
+        """
+        if not isinstance(section, dict) or not section:
+            return 0, 0
+        available = 0
+        for entry in section.values():
+            if isinstance(entry, dict):
+                if entry.get("is_available") or entry.get("value") is not None:
+                    available += 1
+            elif entry not in (None, ""):
+                available += 1
+        return available, len(section)
+
+    def _calculate_confidence(
+        self,
+        *,
+        price_data: Optional[Dict[str, Any]],
+        fundamental_data: Optional[Dict[str, Any]],
+        valuation_data: Optional[Dict[str, Any]],
+        technical_data: Optional[Dict[str, Any]],
+        company_info: Optional[Dict[str, Any]],
+        news_data: Optional[Dict[str, Any]],
+    ) -> float:
+        """Deterministic confidence from data completeness (never invented).
+
+        Weights cover the six evidentiary pillars so the score reflects how much
+        real data supported the report, rather than a hardcoded value. The AI
+        only interprets data; it does not fabricate the confidence level.
+        """
+        price_ok = bool(price_data and price_data.get("price"))
+        info_ok = bool(
+            company_info
+            and (company_info.get("name") or company_info.get("sector")
+                 or company_info.get("industry") or company_info.get("board"))
+        )
+
+        # Fundamental completeness across growth / profitability / health / cashflow.
+        fund = fundamental_data or {}
+        fund_avail, fund_total = 0, 0
+        for key in ("growth", "profitability", "financial_health", "cash_flow"):
+            a, t = self._count_available(fund.get(key) or {})
+            fund_avail += a
+            fund_total += t
+        fund_score = fund_avail / fund_total if fund_total else 0.0
+
+        # Valuation: current multiples + optional historical comparison.
+        val = valuation_data or {}
+        val_total = len(val.get("valuations") or {})
+        val_avail, _ = self._count_available(val.get("valuations") or {})
+        hist_avail = len(val.get("historical_comparison") or {})
+        val_score = (
+            (val_avail / val_total) * 0.6 if val_total else 0.0
+        ) + (0.4 if hist_avail else 0.0)
+        val_score = min(val_score, 1.0)
+
+        tech = technical_data or {}
+        tech_ok = bool(tech.get("indicators") or tech.get("signals"))
+        news_ok = bool((news_data or {}).get("news"))
+
+        score = (
+            0.15 * (1.0 if price_ok else 0.0)
+            + 0.10 * (1.0 if info_ok else 0.0)
+            + 0.25 * fund_score
+            + 0.15 * val_score
+            + 0.20 * (1.0 if tech_ok else 0.0)
+            + 0.15 * (1.0 if news_ok else 0.0)
+        )
+        return round(min(score, 1.0), 2)
+
     def analyze_stock(
         self,
         ticker: str,
@@ -490,7 +565,15 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         if include_history:
             report.data_sources.append("historical_analysis")
 
-        report.confidence = 0.5  # Mock confidence - would be calculated from data quality
+        # Deterministic confidence from real data completeness (not a mock value).
+        report.confidence = self._calculate_confidence(
+            price_data=price_data,
+            fundamental_data=fundamental_data,
+            valuation_data=valuation_data,
+            technical_data=technical_data,
+            company_info=company_info,
+            news_data=news_data,
+        )
 
         return report
 

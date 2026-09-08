@@ -1,7 +1,18 @@
 const API = "";
+// Aggregated dashboard header stats + sector list (from /stocks/meta).
+let stocksMeta = {
+  total: 0,
+  priced: 0,
+  advancers: 0,
+  decliners: 0,
+  sectors: [],
+};
 let stocks = [];
+let stocksIndex = [];
 let favorites = new Set();
 let favoritesDetails = {};
+let favoriteQuotes = {};
+let macroQuotes = {};
 let triggeredAlerts = [];
 let activeSectors = [];
 let stocksPage = 1;
@@ -26,6 +37,9 @@ let stocksView = [];
 let lastScreenData = { results: [] };
 let screenSortState = { key: "score", dir: "desc" };
 let lastCompareData = { stocks: [], tickers: [] };
+// "Best Ideas": ONLY bullish candidates (filter=bullish_validity) ordered by the
+// deterministic Result-Validator score (rank=validity). Disabled = default list.
+let researchBestIdeas = false;
 // AI chat state
 let aiStreaming = false;
 let aiHistory = [];
@@ -40,6 +54,21 @@ function fmtIDR(n) {
   if (n === null || n === undefined) return "—";
   return "Rp " + Number(n).toLocaleString("id-ID");
 }
+function fmtBillion(n) {
+  // ``financial_ratios`` stores monetary figures in IDR billions. Show a unit
+  // so e.g. 140173 (billion) renders as "Rp 140.173 M" or "Rp 140,17 T".
+  if (n === null || n === undefined) return "—";
+  const num = Number(n);
+  if (Math.abs(num) >= 1000)
+    return (
+      "Rp " +
+      (num / 1000).toLocaleString("id-ID", { maximumFractionDigits: 2 }) +
+      " T"
+    );
+  return (
+    "Rp " + num.toLocaleString("id-ID", { maximumFractionDigits: 1 }) + " M"
+  );
+}
 function fmtNum(n) {
   if (n === null || n === undefined) return "—";
   return Number(n).toLocaleString("id-ID");
@@ -49,11 +78,19 @@ function fmtNum(n) {
 async function loadDashboard() {
   showView("view-dashboard");
   try {
-    const data = await fetchJSON("/stocks");
-    stocks = data.stocks || [];
+    // Header stats + sector list are aggregated server-side (no full 973-row load).
+    const meta = await fetchJSON("/stocks/meta");
+    stocksMeta = meta || {};
+    // Lightweight ticker/name/sector index for header search (no price rows).
+    try {
+      const idx = await fetchJSON("/stocks/index?limit=0");
+      stocksIndex = (idx && idx.rows) || [];
+    } catch (e) {
+      stocksIndex = [];
+    }
     renderDashboardStats();
     renderSectorFilters();
-    renderStocksTable();
+    await renderStocksTable();
     await loadFavorites();
     if (favorites.size > 0) renderFavorites();
     loadMacroImpact();
@@ -63,15 +100,12 @@ async function loadDashboard() {
 }
 
 function renderDashboardStats() {
-  const priced = stocks.filter((s) => s.close != null);
-  const advancers = priced.filter((s) => (s.change || 0) > 0).length;
-  const decliners = priced.filter((s) => (s.change || 0) < 0).length;
-  const totalUp = priced.reduce((a, s) => a + (s.change_pct || 0), 0);
+  const m = stocksMeta || {};
   document.getElementById("dashboardStats").innerHTML =
-    stat("Total Saham", stocks.length, "emiten IDX") +
-    stat("Dengan Harga", priced.length, "memiliki data harga") +
-    stat("Naik", advancers, "advancers", "up") +
-    stat("Turun", decliners, "decliners", "down");
+    stat("Total Saham", m.total ?? 0, "emiten IDX") +
+    stat("Dengan Harga", m.priced ?? 0, "memiliki data harga") +
+    stat("Naik", m.advancers ?? 0, "advancers", "up") +
+    stat("Turun", m.decliners ?? 0, "decliners", "down");
 }
 function stat(label, value, sub, cls) {
   return `<div class="stat-card"><div class="label">${label}</div><div class="value ${cls || ""}">${value}</div><div class="sub">${sub}</div></div>`;
@@ -89,6 +123,23 @@ async function loadMacroImpact(force) {
   try {
     // Read the persisted daily candidates (deterministic sector/ticker list).
     const data = await fetchJSON("/research/candidates?hours=48");
+    // Fetch prices for the ticker-level candidates via the batch quote endpoint.
+    const candTickers = [
+      ...new Set(
+        ((data && data.candidates) || []).map((c) => c.ticker).filter(Boolean),
+      ),
+    ];
+    macroQuotes = {};
+    if (candTickers.length) {
+      try {
+        const q = await fetchJSON(
+          "/stocks/quote?tickers=" + candTickers.join(","),
+        );
+        macroQuotes = (q && q.quotes) || {};
+      } catch (e) {
+        macroQuotes = {};
+      }
+    }
     renderMacroImpact(data);
   } catch (e) {
     el.innerHTML = `<div class="loading">Gagal memuat dampak makro: ${e.message}</div>`;
@@ -145,10 +196,10 @@ function macroCard(c) {
   const title = ticker
     ? `<button class="macro-chip macro-chip-btn" onclick="openResearchCandidate('${ticker}')">${ticker}</button>`
     : `<span class="macro-chip">Sektor</span>`;
-  // Latest price change for a ticker candidate (from the loaded `/stocks` list).
+  // Latest price change for a ticker candidate (from the macro quote map).
   let priceHtml = "";
   if (ticker) {
-    const s = (stocks || []).find((x) => x.ticker === ticker);
+    const s = macroQuotes[ticker] || null;
     if (s) {
       const chg = s.change_pct;
       const chgCls =
@@ -159,9 +210,9 @@ function macroCard(c) {
     }
   }
   return `<div class="macro-card">
-    <div class="macro-ticks">${title}</div>
-    <div class="macro-counts">
-      <span class="muted" style="font-size: 0.72rem">conf ${conf}</span>
+    <div class="macro-left">
+      <div class="macro-ticks">${title}</div>
+      <div class="macro-counts"><span class="muted">conf ${conf}</span></div>
     </div>
     ${priceHtml}
   </div>`;
@@ -212,7 +263,7 @@ async function openResearchCandidate(ticker) {
 }
 
 function renderSectorFilters() {
-  const sectors = [...new Set(stocks.map((s) => s.sector).filter(Boolean))];
+  const sectors = (stocksMeta && stocksMeta.sectors) || [];
   const container = document.getElementById("sectorFilters");
   // Always render a clear-all ("Semua") chip plus each sector.
   const chip = (label, sel, click, extraCls) =>
@@ -258,40 +309,37 @@ function setSectorsAll() {
   renderStocksTable();
 }
 
-function renderStocksTable() {
-  const q = (document.getElementById("stockFilter").value || "").toLowerCase();
-  const filtered = stocks.filter(
-    (s) =>
-      (activeSectors.length === 0 || activeSectors.includes(s.sector)) &&
-      (!q || (s.ticker + " " + s.name).toLowerCase().includes(q)),
-  );
-  // Sorting: click a header to toggle (none/asc/desc → next cycle).
-  if (sortKey) {
-    filtered.sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
-      const an = Number(av);
-      const bn = Number(bv);
-      const useNum = !Number.isNaN(an) && !Number.isNaN(bn);
-      if (useNum) return (an - bn) * (sortDir === "asc" ? 1 : -1);
-      const cmp = String(av ?? "").localeCompare(String(bv ?? ""));
-      return cmp * (sortDir === "asc" ? 1 : -1);
-    });
+async function renderStocksTable() {
+  const el = document.getElementById("stocksBody");
+  if (!el) return;
+  el.innerHTML =
+    '<tr><td colspan="8" class="loading">Memuat saham...</td></tr>';
+  const params = new URLSearchParams({
+    page: String(stocksPage),
+    limit: String(stocksPageSize),
+    q: document.getElementById("stockFilter").value || "",
+    sort: sortKey || "",
+    dir: sortDir || "asc",
+  });
+  if (activeSectors.length === 1) params.set("sector", activeSectors[0]);
+  else if (activeSectors.length > 1) {
+    params.set("sector", activeSectors.join(","));
   }
-  stocksView = filtered;
-  const total = filtered.length;
-  const pages = Math.max(1, Math.ceil(total / stocksPageSize));
-  stocksPage = Math.min(Math.max(1, stocksPage), pages);
-  const start = (stocksPage - 1) * stocksPageSize;
-  const pageRows = filtered.slice(start, start + stocksPageSize);
-  const body = pageRows
-    .map((s) => {
-      const chg = s.change_pct;
-      const cls = chg > 0 ? "up" : chg < 0 ? "down" : "muted";
-      const chgTxt =
-        chg == null ? "—" : (chg > 0 ? "+" : "") + chg.toFixed(2) + "%";
-      const star = favorites.has(s.ticker) ? "★" : "☆";
-      return `<tr onclick="openStock('${s.ticker}')">
+  try {
+    const d = await fetchJSON("/stocks?" + params.toString());
+    const rows = d.stocks || [];
+    stocks = rows;
+    const total = d.total || rows.length;
+    const pages = d.pages || 1;
+    stocksPage = d.page || stocksPage;
+    const body = rows
+      .map((s) => {
+        const chg = s.change_pct;
+        const cls = chg > 0 ? "up" : chg < 0 ? "down" : "muted";
+        const chgTxt =
+          chg == null ? "—" : (chg > 0 ? "+" : "") + chg.toFixed(2) + "%";
+        const star = favorites.has(s.ticker) ? "★" : "☆";
+        return `<tr onclick="openStock('${s.ticker}')">
                     <td><span class="star-row" onclick="event.stopPropagation(); toggleFavorite('${s.ticker}')">${star}</span></td>
                     <td><span class="ticker-badge">${s.ticker}</span></td>
                     <td>${s.name}</td>
@@ -301,12 +349,18 @@ function renderStocksTable() {
                     <td>${fmtNum(s.volume)}</td>
                     <td class="muted">${s.date || "—"}</td>
                 </tr>`;
-    })
-    .join("");
-  document.getElementById("stocksBody").innerHTML =
-    body || '<tr><td colspan="8" class="loading">Tidak ada hasil</td></tr>';
-  updateSortMarks();
-  renderStocksPagination(total, pages);
+      })
+      .join("");
+    el.innerHTML =
+      body || '<tr><td colspan="8" class="loading">Tidak ada hasil</td></tr>';
+    updateSortMarks();
+    renderStocksPagination(total, pages);
+  } catch (e) {
+    el.innerHTML =
+      '<tr><td colspan="8" class="loading">Gagal memuat: ' +
+      escapeHtml(e.message) +
+      "</td></tr>";
+  }
 }
 
 function updateSortMarks() {
@@ -368,6 +422,20 @@ async function loadFavorites() {
     favorites = new Set(d.tickers || []);
   } catch (e) {
     favorites = new Set();
+  }
+  // Fetch prices/change for the favourite cards via the batch quote endpoint
+  // (no need to load the full 973-row stock list just for the watchlist).
+  try {
+    if (favorites.size) {
+      const q = await fetchJSON(
+        "/stocks/quote?tickers=" + [...favorites].join(","),
+      );
+      favoriteQuotes = (q && q.quotes) || {};
+    } else {
+      favoriteQuotes = {};
+    }
+  } catch (e) {
+    favoriteQuotes = {};
   }
   await Promise.all([loadFavoritesDetails(), loadAlerts()]);
   renderFavorites();
@@ -451,41 +519,50 @@ async function clearAlert(tickerArg) {
 
 async function renderFavorites() {
   const grid = document.getElementById("favoritesGrid");
-  const favStocks = stocks.filter((s) => favorites.has(s.ticker));
-  grid.innerHTML =
-    favStocks
-      .map((s) => {
-        const chg = s.change_pct;
-        const cls = chg > 0 ? "up" : chg < 0 ? "down" : "muted";
-        const det = favoritesDetails[s.ticker] || {};
-        const hasAlert = det.alert_enabled && det.alert_price;
-        const dirVal = det.alert_direction || "above";
-        const alertCtl = hasAlert
-          ? '<div class="alert-ctl"><span class="alert-on">🔔 ' +
-            fmtIDR(det.alert_price) +
-            " (" +
-            det.alert_direction +
-            ')</span><button class="alert-btn" onclick="event.stopPropagation(); clearAlert(\'' +
-            s.ticker +
-            "')\">×</button></div>"
-          : '<div class="alert-ctl"><input id="alertInput-' +
-            s.ticker +
-            '" type="text" placeholder="target" inputmode="decimal"><select id="alertDir-' +
-            s.ticker +
-            '"><option value="above">≥</option><option value="below">≤</option></select><button class="alert-btn" onclick="event.stopPropagation(); setAlert(\'' +
-            s.ticker +
-            "')\">🔔</button></div>";
-        return `<div class="fav-card" onclick="openStock('${s.ticker}')">
-                    <span class="star on" onclick="event.stopPropagation(); toggleFavorite('${s.ticker}')">★</span>
-                    <div class="ticker">${s.ticker}</div>
-                    <div class="name">${s.name || ""}</div>
-                    <div class="price-row"><span class="price">${fmtIDR(s.close)}</span><span class="change ${cls}">${chg == null ? "—" : (chg > 0 ? "+" : "") + chg.toFixed(2) + "%"}</span></div>
-                    <div class="muted" style="font-size:.78rem">${s.sector || ""}</div>
-                    ${alertCtl}
-                </div>`;
-      })
-      .join("") ||
-    '<div class="muted">Belum ada favorit. Klik ☆ pada saham untuk menambahkan.</div>';
+  if (!grid) return;
+  const favTickers = [...favorites];
+  if (!favTickers.length) {
+    grid.innerHTML =
+      '<div class="muted">Belum ada favorit. Klik &#9734; pada saham untuk menambahkan.</div>';
+    return;
+  }
+  grid.innerHTML = favTickers
+    .map((t) => {
+      const s = favoriteQuotes[t] || {};
+      const chg = s.change_pct;
+      const cls =
+        chg == null ? "muted" : chg > 0 ? "up" : chg < 0 ? "down" : "muted";
+      const det = favoritesDetails[t] || {};
+      const price = det.current_price != null ? det.current_price : s.close;
+      const hasAlert = det.alert_enabled && det.alert_price;
+      const alertCtl = hasAlert
+        ? `<div class="alert-ctl">
+            <span class="alert-on">&#128276; ${fmtIDR(det.alert_price)} (${det.alert_direction === "below" ? "&#8804;" : "&#8805;"})</span>
+            <button class="alert-btn" title="Hapus alert" onclick="event.stopPropagation(); clearAlert('${t}')">&times;</button>
+          </div>`
+        : `<div class="alert-ctl">
+            <input id="alertInput-${t}" type="text" placeholder="target" inputmode="decimal" onclick="event.stopPropagation()" />
+            <select id="alertDir-${t}" onclick="event.stopPropagation()">
+              <option value="above">&#8805;</option>
+              <option value="below">&#8804;</option>
+            </select>
+            <button class="alert-btn" title="Pasang alert harga" onclick="event.stopPropagation(); setAlert('${t}')">&#128276;</button>
+          </div>`;
+      return `<div class="fav-card" onclick="openStock('${t}')">
+        <div class="fav-head">
+          <span class="ticker">${t}</span>
+          <span class="star on" title="Hapus favorit" onclick="event.stopPropagation(); toggleFavorite('${t}')">&#9733;</span>
+        </div>
+        <div class="name">${s.name || ""}</div>
+        <div class="price-row">
+          <span class="price">${fmtIDR(price)}</span>
+          <span class="change ${cls}">${chg == null ? "&mdash;" : (chg > 0 ? "+" : "") + chg.toFixed(2) + "%"}</span>
+        </div>
+        <div class="sector">${s.sector || ""}</div>
+        ${alertCtl}
+      </div>`;
+    })
+    .join("");
 }
 
 async function toggleFavorite(tickerArg) {
@@ -512,7 +589,7 @@ function updateFavButton() {
 let searchIdx = -1;
 
 function searchSuggestions(q) {
-  const list = stocks || [];
+  const list = stocksIndex || [];
   const query = (q || "").trim().toLowerCase();
   if (!query) return list.slice(0, 8);
   const exact = list.filter(
@@ -552,7 +629,9 @@ function renderSearchDropdown() {
     .map((s, i) => {
       const cls = i === searchIdx ? "active" : "";
       const meta = [s.sector, s.industry].filter(Boolean).join(" · ");
-      return `<div class="search-item ${cls}" onclick="pickSearchSuggestion('${s.ticker}')">
+      // preventDefault on mousedown keeps focus in the input, so the blur
+      // timeout can't hide the dropdown between mousedown and mouseup.
+      return `<div class="search-item ${cls}" onmousedown="if (event.pointerType !== 'touch') event.preventDefault()" onclick="pickSearchSuggestion('${s.ticker}')">
         <span class="search-item-ticker">${s.ticker}</span>
         <span class="search-item-body">
           <span class="search-item-name">${s.name}</span>
@@ -689,17 +768,25 @@ const METRIC_LABELS = {
   operating_margin: "Operating Margin",
   net_margin: "Net Margin",
   debt_to_equity: "Debt / Equity",
+  net_debt_to_ebitda: "Net Debt / EBITDA",
   current_ratio: "Current Ratio",
   interest_coverage: "Interest Coverage",
+  payout_ratio: "Payout Ratio",
+  revenue_cagr: "Revenue CAGR (3y)",
+  earnings_cagr: "Earnings CAGR (3y)",
+  eps_cagr: "EPS CAGR (3y)",
   revenue: "Revenue",
   net_income: "Net Income",
   eps: "EPS",
   total_assets: "Total Assets",
+  total_equity: "Total Equity",
+  total_debt: "Total Debt",
 };
 function fmtMetric(k, v) {
   if (v == null) return "—";
   const n = Number(v);
-  const pctKeys = [
+  // Already stored in percent scale (margins/ROE/ROA/ROIC/dividend yield).
+  const pctDirect = [
     "roe",
     "roa",
     "roic",
@@ -708,9 +795,28 @@ function fmtMetric(k, v) {
     "net_margin",
     "dividend_yield",
   ];
-  if (pctKeys.includes(k)) return n.toFixed(2) + "%";
-  if (["revenue", "net_income", "total_assets", "eps"].includes(k))
-    return fmtIDR(n);
+  // Stored as a decimal fraction; display as percent (x100).
+  const pctDecimal = [
+    "revenue_cagr",
+    "earnings_cagr",
+    "eps_cagr",
+    "payout_ratio",
+  ];
+  if (pctDirect.includes(k)) return n.toFixed(2) + "%";
+  if (pctDecimal.includes(k)) return (n * 100).toFixed(2) + "%";
+  // Monetary figures are stored in IDR billions (except EPS, per-share rupiah).
+  if (
+    [
+      "revenue",
+      "net_income",
+      "total_assets",
+      "total_equity",
+      "total_debt",
+    ].includes(k)
+  )
+    return fmtBillion(n);
+  if (k === "eps")
+    return "Rp " + n.toLocaleString("id-ID", { maximumFractionDigits: 2 });
   return n.toLocaleString("id-ID", { maximumFractionDigits: 2 });
 }
 function renderMetrics(m) {
@@ -1027,7 +1133,178 @@ async function loadAnalysis() {
         (v.innerHTML =
           '<div class="muted">Data valuation tidak tersedia.</div>'),
     );
+
+  const div = document.getElementById("analysisDividend");
+  if (div) {
+    div.innerHTML = '<div class="loading">Memuat analisis dividen...</div>';
+    fetchJSON("/ai/dividend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker: currentTicker, use_llm: false }),
+    })
+      .then((d) => {
+        div.innerHTML = renderDividendAnalysis(d);
+      })
+      .catch(
+        () =>
+          (div.innerHTML =
+            '<div class="muted">Data dividen tidak tersedia.</div>'),
+      );
+  }
 }
+
+function renderDividendAnalysis(d) {
+  if (!d || !d.metrics)
+    return '<div class="muted">Tidak ada data dividen.</div>';
+  const m = d.metrics;
+  const fmtPct = (v) =>
+    v == null
+      ? "—"
+      : Number(v).toLocaleString("id-ID", { maximumFractionDigits: 2 }) + "%";
+  const fmtX = (v) =>
+    v == null
+      ? "—"
+      : Number(v).toLocaleString("id-ID", { maximumFractionDigits: 2 }) + "x";
+  const score = d.safety_score;
+  const grade = d.grade || "";
+  const scoreCls = score >= 75 ? "up" : score >= 45 ? "muted" : "down";
+  const risk = d.yield_trap_risk;
+  const riskTxt =
+    risk === "high"
+      ? "⚠ Yield Trap"
+      : risk === "monitoring"
+        ? "Monitoring"
+        : "Aman";
+  const riskCls =
+    risk === "high" ? "down" : risk === "monitoring" ? "muted" : "up";
+
+  const rows = [
+    ["Dividend Yield", fmtPct(m.dividend_yield)],
+    ["Payout Ratio (EPS)", fmtPct(m.payout_ratio)],
+    ["FCF Margin", fmtPct(m.fcf_margin)],
+    ["Earnings CAGR (3Y)", fmtPct(m.earnings_cagr)],
+    ["Debt / Equity", fmtX(m.debt_to_equity)],
+    ["Current Ratio", fmtX(m.current_ratio)],
+    ["Interest Coverage", fmtX(m.interest_coverage)],
+  ].map(
+    ([label, val]) =>
+      '<div class="row"><span class="label">' +
+      escapeHtml(label) +
+      "</span><span>" +
+      (val === "—" ? '<span class="muted">—</span>' : val) +
+      "</span></div>",
+  );
+
+  const flags = (d.red_flags || [])
+    .map((f) => "<li>" + escapeHtml(f) + "</li>")
+    .join("");
+
+  return (
+    '<div class="row"><span class="label">Safety Score</span><span class="' +
+    scoreCls +
+    '">' +
+    Number(score).toFixed(0) +
+    "/100 · " +
+    escapeHtml(grade) +
+    "</span></div>" +
+    '<div class="row"><span class="label">Yield Trap</span><span class="' +
+    riskCls +
+    '">' +
+    riskTxt +
+    "</span></div>" +
+    rows.join("") +
+    (flags
+      ? '<div class="muted" style="margin-top:0.4rem"><ul style="margin:0.2rem 0 0;padding-left:1.1rem">' +
+        flags +
+        "</ul></div>"
+      : "") +
+    (d.has_data === false
+      ? '<div class="muted" style="margin-top:0.4rem">Data dividen belum tersedia untuk saham ini.</div>'
+      : "")
+  );
+}
+const ANALYSIS_LABELS = {
+  // Section groups
+  growth: "Pertumbuhan",
+  profitability: "Profitabilitas",
+  financial_health: "Kesehatan Keuangan",
+  cash_flow: "Arus Kas",
+  momentum: "Momentum",
+  indicators: "Indikator Teknikal",
+  technical_position: "Posisi Teknikal",
+  historical_comparison: "Perbandingan Historis",
+  // Growth
+  revenue_cagr_3y: "Revenue CAGR (3 thn)",
+  earnings_cagr_3y: "Laba CAGR (3 thn)",
+  eps_cagr_3y: "EPS CAGR (3 thn)",
+  revenue_cagr: "Revenue CAGR",
+  earnings_cagr: "Laba CAGR",
+  eps_cagr: "EPS CAGR",
+  // Profitability
+  revenue: "Pendapatan",
+  net_income: "Laba Bersih",
+  operating_income: "Laba Operasi",
+  gross_margin: "Gross Margin",
+  operating_margin: "Operating Margin",
+  net_margin: "Net Margin",
+  roe: "ROE",
+  roa: "ROA",
+  roic: "ROIC",
+  fcf_margin: "FCF Margin",
+  // Financial health
+  debt_to_equity: "Debt / Equity",
+  net_debt_to_ebitda: "Net Debt / EBITDA",
+  current_ratio: "Current Ratio",
+  interest_coverage: "Interest Coverage",
+  // Valuation
+  pe_ratio: "P/E Ratio",
+  pb_ratio: "P/B Ratio",
+  ev_ebitda: "EV/EBITDA",
+  ev_ebit: "EV/EBIT",
+  p_fcf: "P/FCF",
+  dividend_yield: "Dividend Yield",
+  payout_ratio: "Payout Ratio",
+  valuation_date: "Tanggal Valuasi",
+  current_price: "Harga Saat Ini",
+  valuations: "Valuasi",
+  current: "Saat Ini",
+  median_5y: "Median 5 Tahun",
+  percentile: "Persentil Historis",
+  is_expensive: "Tergolong Mahal?",
+  is_cheap: "Tergolong Murah?",
+  // Technical
+  price: "Harga",
+  sma_20: "SMA 20",
+  sma20: "SMA 20",
+  sma_50: "SMA 50",
+  sma50: "SMA 50",
+  sma_200: "SMA 200",
+  sma200: "SMA 200",
+  ema_12: "EMA 12",
+  ema12: "EMA 12",
+  ema_26: "EMA 26",
+  ema26: "EMA 26",
+  ema_20: "EMA 20",
+  ema_50: "EMA 50",
+  ema_200: "EMA 200",
+  rsi_14: "RSI (14)",
+  rsi: "RSI",
+  macd: "MACD",
+  macd_line: "MACD Line",
+  signal_line: "Signal Line",
+  histogram: "Histogram",
+  atr: "ATR",
+  volatility: "Volatilitas",
+  volume_ratio: "Volume Ratio",
+  drawdown: "Drawdown",
+  upper: "Upper Band",
+  middle: "Middle Band",
+  lower: "Lower Band",
+  bandwidth: "Bandwidth",
+  percent_b: "%B",
+  price_vs_sma_200: "Harga vs SMA 200",
+};
+
 function renderAnalysisRows(d) {
   if (!d) return '<div class="muted">Tidak ada data.</div>';
   const skipKeys = new Set([
@@ -1038,65 +1315,130 @@ function renderAnalysisRows(d) {
     "notes",
     "currency",
     "unit",
+    "signals",
+    "indicator_name",
   ]);
-  const human = (k) => String(k).replace(/_/g, " ");
-  const html = (v) => {
+  // Nice-casing fallback for any key we have not mapped explicitly: title-case
+  // each word instead of exposing raw snake_case keys.
+  const title = (k) =>
+    String(k)
+      .replace(/_/g, " ")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w, i) => {
+        const lo = w.toLowerCase();
+        if (
+          i > 0 &&
+          [
+            "to",
+            "of",
+            "for",
+            "and",
+            "per",
+            "the",
+            "a",
+            "vs",
+            "on",
+            "by",
+            "in",
+            "at",
+          ].includes(lo)
+        )
+          return lo;
+        return lo.charAt(0).toUpperCase() + lo.slice(1);
+      })
+      .join(" ");
+  const friendly = (k) => ANALYSIS_LABELS[k] || title(k);
+  // Metrics whose values are DECIMALS in this endpoint (growth CAGR + profitability
+  // margins/ROE/ROA/ROIC + FCF margin). Ratio/multiple metrics (debt/equity,
+  // net-debt/EBITDA, current ratio, interest coverage) are left as-is.
+  const pctKeys = new Set([
+    "revenue_cagr_3y",
+    "earnings_cagr_3y",
+    "eps_cagr_3y",
+    "gross_margin",
+    "operating_margin",
+    "net_margin",
+    "roe",
+    "roa",
+    "roic",
+    "fcf_margin",
+  ]);
+  const html = (v, key) => {
     if (v === null || v === undefined) return "—";
     if (typeof v === "boolean") return v ? "✓" : "✗";
-    if (typeof v === "number")
-      return Number.isFinite(v)
-        ? v.toLocaleString(undefined, { maximumFractionDigits: 4 })
-        : "—";
+    if (typeof v === "number") {
+      if (!Number.isFinite(v)) return "—";
+      if (key && pctKeys.has(key)) {
+        const pct = v * 100;
+        return pct.toLocaleString("id-ID", { maximumFractionDigits: 2 }) + "%";
+      }
+      // Larger values (prices, counts) are clearest with at most 2 decimals;
+      // small ratios keep enough precision.
+      const digits = Math.abs(v) >= 100 ? 2 : Math.abs(v) >= 1 ? 3 : 4;
+      return v.toLocaleString("id-ID", { maximumFractionDigits: digits });
+    }
     return escapeHtml(String(v));
   };
+  const valueSpan = (content, cls) =>
+    '<span class="value' + (cls ? " " + cls : "") + '">' + content + "</span>";
   // Render a single dict entry: if it has derived fields (value/signal) show them inline.
   const renderEntry = (key, val) => {
     if (val && typeof val === "object" && !Array.isArray(val) && val !== null) {
       // A structured metric dict (value + signal + is_available) -> one row.
       if ("value" in val || "metric_name" in val || "is_available" in val) {
+        if (val.is_available === false) {
+          return (
+            '<div class="row"><span class="label">' +
+            escapeHtml(friendly(key)) +
+            "</span>" +
+            valueSpan('<span class="muted">—</span>') +
+            "</div>"
+          );
+        }
         const detail = [];
-        if ("value" in val) detail.push(html(val.value));
+        if ("value" in val) detail.push(html(val.value, key));
         if ("signal" in val && val.signal)
           detail.push("<em>" + escapeHtml(String(val.signal)) + "</em>");
-        if ("is_available" in val && val.is_available === false)
-          detail.push("<span class='muted'>unavailable</span>");
         return (
           '<div class="row"><span class="label">' +
-          escapeHtml(human(key)) +
-          "</span><span>" +
-          (detail.join(" · ") || "—") +
-          "</span></div>"
+          escapeHtml(friendly(key)) +
+          "</span>" +
+          valueSpan(detail.join(" · ") || "—") +
+          "</div>"
         );
       }
       // Otherwise render as a sub-group (nested dict, e.g. inputs / historical_comparison).
       const children = Object.entries(val)
-        .filter(([k2, v2]) => typeof v2 !== "function")
+        .filter(([k2, v2]) => typeof v2 !== "function" && !skipKeys.has(k2))
         .map(([k2, v2]) => renderEntry(k2, v2))
         .join("");
       return children
-        ? '<div class="row label">' +
-            escapeHtml(human(key)) +
+        ? '<div class="analysis-group">' +
+            escapeHtml(friendly(key)) +
             "</div>" +
             children
         : '<div class="row"><span class="label">' +
-            escapeHtml(human(key)) +
-            "</span><span>—</span></div>";
+            escapeHtml(friendly(key)) +
+            "</span>" +
+            valueSpan("—") +
+            "</div>";
     }
     if (Array.isArray(val)) {
       return (
         '<div class="row"><span class="label">' +
-        escapeHtml(human(key)) +
-        "</span><span>" +
-        val.map(html).join(", ") +
-        "</span></div>"
+        escapeHtml(friendly(key)) +
+        "</span>" +
+        valueSpan(val.map((x) => html(x, key)).join(", ")) +
+        "</div>"
       );
     }
     return (
       '<div class="row"><span class="label">' +
-      escapeHtml(human(key)) +
-      "</span><span>" +
-      html(val) +
-      "</span></div>"
+      escapeHtml(friendly(key)) +
+      "</span>" +
+      valueSpan(html(val, key)) +
+      "</div>"
     );
   };
   const entries = Object.entries(d).filter(
@@ -1108,7 +1450,37 @@ function renderAnalysisRows(d) {
       escapeHtml(d.notes || "Tidak ada data.") +
       "</div>"
     );
-  return entries.map(([k, v]) => renderEntry(k, v)).join("");
+  // A ``signals`` map (e.g. technical trend/RSI/MACD) is surfaced as coloured
+  // badge chips at the top instead of buried as nested rows.
+  const signalChips = (() => {
+    const sig = d.signals;
+    if (!sig || typeof sig !== "object" || Array.isArray(sig)) return "";
+    const LABELS = {
+      trend: "Trend",
+      rsi: "RSI",
+      macd: "MACD",
+      momentum: "Momentum",
+    };
+    const chips = Object.entries(sig)
+      .filter(([, val]) => val != null && val !== "")
+      .map(([k, val]) => {
+        const label = LABELS[k] || friendly(k);
+        const cls =
+          String(val).toLowerCase() === "bullish" ||
+          String(val).toLowerCase() === "overbought" ||
+          String(val).toLowerCase() === "buy"
+            ? "signal-up"
+            : String(val).toLowerCase() === "bearish" ||
+                String(val).toLowerCase() === "oversold" ||
+                String(val).toLowerCase() === "sell"
+              ? "signal-down"
+              : "signal-neutral";
+        return `<span class="signal-chip ${cls}"><span class="signal-k">${escapeHtml(label)}</span> ${escapeHtml(String(val))}</span>`;
+      })
+      .join("");
+    return chips ? `<div class="signal-row">${chips}</div>` : "";
+  })();
+  return signalChips + entries.map(([k, v]) => renderEntry(k, v)).join("");
 }
 
 // ---------- Fundamentals chart (multi-period) ----------
@@ -1235,7 +1607,28 @@ async function loadResearchHistory() {
     }
     el.innerHTML = reports
       .map((r, i) => {
-        const sections = r.sections || {};
+        // The canonical format nests content under ``sections`` (endpoint + new
+        // pipeline reports). Older pipeline reports stored the fields flat at the
+        // top level, so fall back to those when ``sections`` is absent.
+        let sections = r.sections;
+        if (!sections) {
+          sections = {};
+          [
+            "executive_summary",
+            "business_quality",
+            "growth_analysis",
+            "profitability",
+            "financial_health",
+            "valuation",
+            "technical_position",
+            "recent_events",
+            "risks",
+            "bull_case",
+            "base_case",
+            "bear_case",
+            "conclusion",
+          ].forEach((k) => (sections[k] = r[k] || ""));
+        }
         const conf = r.confidence_score;
         const confTxt =
           typeof conf === "number" ? (conf * 100).toFixed(0) + "%" : "—";
@@ -1276,13 +1669,57 @@ async function loadResearchHistory() {
             );
           })
           .join("");
+        // Build the expandable Result-Validator audit (5 dimensions + flags)
+        // from the deterministic score attached to this saved report.
+        const auditHtml =
+          r.validator_score == null
+            ? ""
+            : (() => {
+                const dims = r.validator_dimensions || {};
+                const dimLabels = [
+                  ["data_quality", "Data Quality"],
+                  ["methodology", "Methodology"],
+                  ["signal_consistency", "Signal Consistency"],
+                  ["risk_coverage", "Risk Coverage"],
+                  ["transparency", "Transparency"],
+                ];
+                const dimRows = dimLabels
+                  .filter(([k]) => dims[k] != null)
+                  .map(
+                    ([k, label]) =>
+                      `<div class="audit-dim"><span>${escapeHtml(label)}</span><span class="audit-score">${Number(dims[k]).toFixed(0)}/20</span></div>`,
+                  )
+                  .join("");
+                const warns = (r.validator_warnings || [])
+                  .map((w) => `<li>${escapeHtml(String(w))}</li>`)
+                  .join("");
+                const strengths = (r.validator_strengths || [])
+                  .map((s) => `<li>${escapeHtml(String(s))}</li>`)
+                  .join("");
+                return `<details class="audit-detail">
+                  <summary>Audit Kualitas (${escapeHtml(r.validator_tier || "")} · ${Number(r.validator_score).toFixed(0)}/100)</summary>
+                  <div class="audit-dims">${dimRows}</div>
+                  ${
+                    strengths
+                      ? `<div class="audit-block"><div class="audit-block-title">Kekuatan</div><ul>${strengths}</ul></div>`
+                      : ""
+                  }
+                  ${
+                    warns
+                      ? `<div class="audit-block"><div class="audit-block-title">Peringatan / red flag</div><ul>${warns}</ul></div>`
+                      : ""
+                  }
+                </details>`;
+              })();
         return `<div class="research-item">
                 <div class="research-head">
                   <div class="research-date">${date || "#" + (i + 1)}</div>
                   <div class="research-verdict">${escapeHtml(String(verdict))}</div>
                   <div class="research-conf">Confidence ${confTxt}</div>
+                  ${r.validator_score != null ? `<span class="validator-badge badge-${(r.validator_tier || "").toLowerCase().replace(/\s+/g, "-")}" title="Audit kualitas: ${escapeHtml(r.validator_tier || "")} (${Number(r.validator_score).toFixed(0)}/100)">Audit ${escapeHtml(r.validator_tier || "")} ${Number(r.validator_score).toFixed(0)}</span>` : ""}
                 </div>
                 ${q}
+                ${auditHtml}
                 ${
                   contentBlocks
                     ? '<details class="research-detail"><summary>Lihat analisis lengkap</summary>' +
@@ -1304,16 +1741,23 @@ async function loadResearchHistory() {
 async function loadResearchCandidates(force) {
   const el = document.getElementById("researchCandidateList");
   const llmEl = document.getElementById("researchCandidateLLM");
+  const rankEl = document.getElementById("researchRankToggle");
   if (!el) return;
+  if (rankEl) {
+    rankEl.innerHTML = `<button class="back-btn ${researchBestIdeas ? "active" : ""}" onclick="toggleResearchBestIdeas()">Best Ideas</button>`;
+  }
   if (!force) el.innerHTML = '<div class="loading">Memuat kandidat...</div>';
   try {
     // Only show candidates related to the open ticker's own industry/sector.
-    const fromList =
-      (stocks || []).find((s) => s.ticker === currentTicker) || {};
-    const sector = currentStockSector || fromList.sector || "";
+    // Sector comes from the profile already loaded when opening the stock.
+    const sector = currentStockSector || "";
     const params = new URLSearchParams({ hours: "48" });
     if (currentTicker) params.set("ticker", currentTicker);
     if (sector) params.set("sector", sector);
+    if (researchBestIdeas) {
+      params.set("filter", "bullish_validity");
+      params.set("rank", "validity");
+    }
     const d = await fetchJSON("/research/candidates?" + params.toString());
     renderResearchCandidates(d, sector || currentTicker);
   } catch (e) {
@@ -1322,6 +1766,11 @@ async function loadResearchCandidates(force) {
       escapeHtml(e.message) +
       "</p>";
   }
+}
+
+function toggleResearchBestIdeas() {
+  researchBestIdeas = !researchBestIdeas;
+  loadResearchCandidates(true);
 }
 
 function renderResearchCandidates(data, scope) {
@@ -1359,6 +1808,7 @@ function renderResearchCandidates(data, scope) {
         <div class="research-cand-meta">
           <span class="muted">conf ${conf}</span>
           <span class="muted">net ${Number(c.net_strength || 0).toFixed(2)}</span>
+          ${c.validator_score != null ? `<span class="validator-badge badge-${(c.validator_tier || "").toLowerCase().replace(/\s+/g, "-")}" title="Kualitas analisis: ${escapeHtml(c.validator_tier || "")} (${Number(c.validator_score).toFixed(0)}/100)">${escapeHtml(c.validator_tier || "")} ${Number(c.validator_score).toFixed(0)}</span>` : ticker ? `<span class="muted audit-missing" title="Belum ada analisis tersimpan, belum diaudit.">belum diaudit</span>` : ""}
           <span class="muted">${escapeHtml(c.candidate_date || "")}</span>
         </div>
         ${c.reason ? `<div class="research-cand-reason">${escapeHtml(c.reason)}</div>` : ""}
@@ -1869,10 +2319,18 @@ async function analyzeScreenAI() {
         '<p class="muted">Analisis AI tidak tersedia (LLM belum dikonfigurasi). ' +
         "Sedikit hasil screener tetap ditampilkan di tabel.</p>";
     } else {
+      const saved = d.analysis_id
+        ? '<div class="muted" style="margin-top:0.3rem;font-size:0.78rem">✓ Tersimpan (ID ' +
+          d.analysis_id +
+          ")</div>"
+        : "";
       out.innerHTML =
         '<div class="ai-analysis markdown-body"><h3>Interpretasi AI</h3>' +
         mdToHtml(md) +
-        "</div>";
+        "</div>" +
+        saved;
+      // Refresh the history panel so the new run shows up immediately.
+      loadScreenAIAnalyses();
     }
   } catch (e) {
     out.innerHTML =
@@ -1880,6 +2338,58 @@ async function analyzeScreenAI() {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+async function loadScreenAIAnalyses() {
+  const el = document.getElementById("screenAIHistory");
+  if (!el) return;
+  el.innerHTML = '<div class="loading">Memuat riwayat analisis...</div>';
+  try {
+    const d = await fetchJSON("/ai/screen-analysis/history?limit=20");
+    renderScreenAIAnalyses(d.analyses || []);
+  } catch (e) {
+    el.innerHTML =
+      '<p class="muted">Gagal memuat riwayat: ' +
+      escapeHtml(e.message) +
+      "</p>";
+  }
+}
+
+function renderScreenAIAnalyses(analyses) {
+  const el = document.getElementById("screenAIHistory");
+  if (!el) return;
+  if (!analyses || !analyses.length) {
+    el.innerHTML =
+      '<p class="muted">Belum ada analisis AI tersimpan. Jalankan "Analisis AI" untuk menyimpannya.</p>';
+    return;
+  }
+  el.innerHTML =
+    '<div class="research-sec-title" style="margin-top:0.4rem">Riwayat Analisis AI Screener</div>' +
+    analyses
+      .map((a) => {
+        const date = (a.created_at || "").slice(0, 16).replace("T", " ");
+        const type = a.screen_type || "Custom";
+        const md = a.llm_analysis || "";
+        const body = md
+          ? '<div class="markdown-body">' + mdToHtml(md) + "</div>"
+          : '<div class="muted">Tidak ada isi analisis.</div>';
+        return (
+          '<div class="research-item" style="margin-top:0.5rem">' +
+          '<div class="research-head">' +
+          '<div class="research-date">' +
+          date +
+          "</div>" +
+          '<div class="research-verdict">' +
+          escapeHtml(type) +
+          "</div>" +
+          "</div>" +
+          '<details class="research-detail"><summary>Lihat analisis</summary>' +
+          body +
+          "</details>" +
+          "</div>"
+        );
+      })
+      .join("");
 }
 
 function escapeHtml(s) {
@@ -2000,7 +2510,15 @@ function renderCompare(stocks, tickers) {
           : s.metrics
             ? s.metrics[key]
             : undefined;
-      return `<td>${val == null ? "—" : key === "price" ? fmtIDR(val) : typeof val === "number" ? val.toLocaleString("id-ID", { maximumFractionDigits: 2 }) : val}</td>`;
+      // Percentage metrics (roe/net_margin etc.) are stored as decimals by the
+      // backend; fmtMetric renders them as percent. Price is formatted as IDR.
+      const text =
+        key === "price"
+          ? val == null
+            ? "—"
+            : fmtIDR(val)
+          : fmtMetric(key, val);
+      return `<td>${text}</td>`;
     });
     return `<tr><td class="muted">${label}</td>${cells.join("")}</tr>`;
   });
@@ -2031,20 +2549,35 @@ function exportCSV(filename, headers, rows) {
   URL.revokeObjectURL(url);
 }
 
-function exportStocksCSV() {
-  exportCSV(
-    "saham_harga.csv",
-    ["Ticker", "Nama", "Sektor", "Harga", "Perubahan %", "Volume", "Tanggal"],
-    stocksView.map((s) => [
-      s.ticker,
-      s.name,
-      s.sector || "",
-      s.close ?? "",
-      s.change_pct ?? "",
-      s.volume ?? "",
-      s.date || "",
-    ]),
-  );
+async function exportStocksCSV() {
+  // Export the full filtered/sorted set (server fetches every matching row,
+  // not just the page currently on screen).
+  const params = new URLSearchParams({
+    limit: "0",
+    q: document.getElementById("stockFilter").value || "",
+    sort: sortKey || "",
+    dir: sortDir || "asc",
+  });
+  if (activeSectors.length) params.set("sector", activeSectors.join(","));
+  try {
+    const d = await fetchJSON("/stocks?" + params.toString());
+    const rows = d.stocks || [];
+    exportCSV(
+      "saham_harga.csv",
+      ["Ticker", "Nama", "Sektor", "Harga", "Perubahan %", "Volume", "Tanggal"],
+      rows.map((s) => [
+        s.ticker,
+        s.name,
+        s.sector || "",
+        s.close ?? "",
+        s.change_pct ?? "",
+        s.volume ?? "",
+        s.date || "",
+      ]),
+    );
+  } catch (e) {
+    showError("Gagal ekspor: " + e.message);
+  }
 }
 
 function exportScreenCSV() {
@@ -2082,9 +2615,9 @@ function exportCompareCSV() {
   const rows = COMPARE_ROWS.map(([key, label]) => {
     const cells = (tickers || []).map((t) => {
       const s = byTicker[t] || {};
-      return key === "price"
-        ? (s.quote?.price ?? "")
-        : (s.metrics?.[key] ?? "");
+      const val = key === "price" ? s.quote?.price : s.metrics?.[key];
+      if (val == null || val === "") return "";
+      return key === "price" ? val : fmtMetric(key, val).replace(/%$/, "");
     });
     return [label, ...cells];
   });

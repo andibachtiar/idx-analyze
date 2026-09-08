@@ -137,6 +137,7 @@ def _metrics_from_db(ratios: Dict[str, Any]) -> Optional[FinancialMetrics]:
         ev_ebitda=_safe_float(ratios.get("ev_ebitda")),
         revenue_cagr_3y=_safe_float(ratios.get("revenue_cagr")),
         earnings_cagr_3y=_safe_float(ratios.get("earnings_cagr")),
+        eps_cagr_3y=_safe_float(ratios.get("eps_cagr")),
     )
 
 

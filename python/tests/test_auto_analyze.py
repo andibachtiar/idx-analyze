@@ -82,9 +82,21 @@ class TestReportToDict:
     def test_maps_structured_fields(self):
         d = aa.report_to_dict(_Report())
         assert d["ticker"] == "BBCA"
-        assert d["executive_summary"] == "e"
-        assert d["valuation"] == "v"
+        assert d["sections"]["executive_summary"] == "e"
+        assert d["sections"]["valuation"] == "v"
         assert d["confidence_score"] == 0.5
+
+    def test_produces_sections_container(self):
+        """Report saved by the pipeline uses the same sections structure as the API."""
+        d = aa.report_to_dict(_Report())
+        for key in (
+            "executive_summary", "business_quality", "growth_analysis",
+            "profitability", "financial_health", "valuation",
+            "technical_position", "recent_events", "risks", "bull_case",
+            "base_case", "bear_case", "conclusion",
+        ):
+            assert key in d["sections"]
+        assert d["overall_verdict"] == ""
 
 
 class TestRun:

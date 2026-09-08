@@ -36,6 +36,7 @@ from api.schemas import (
     BacktestResponse,
     CatalystRequest,
     CompetitorRequest,
+    DividendAnalysisRequest,
     DocumentResult,
     DocumentSearchRequest,
     DocumentSearchResponse,
@@ -55,6 +56,7 @@ from api.schemas import (
     StockPriceResponse,
     TechnicalAnalysisResponse,
     ThesisValidationRequest,
+    ValidatorRequest,
     ValuationAnalysisRequest,
     ValuationResponse,
 )
@@ -277,6 +279,63 @@ async def ai_fundamental_analysis(request: FundamentalAnalysisRequest):
             use_llm=request.use_llm,
             llm_client=llm_client,
         )
+        return _json_safe({"status": "ok", **result})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/ai/dividend")
+async def ai_dividend_analysis(request: DividendAnalysisRequest):
+    """Deterministic dividend-quality snapshot + Signal Output, optional LLM."""
+    try:
+        from ai.prompts.dividend import analyze_dividend
+
+        llm_client = None
+        if request.use_llm:
+            from ai.llm import LLMClient
+            llm_client = LLMClient()
+        result = analyze_dividend(
+            ticker=request.ticker,
+            use_llm=request.use_llm,
+            llm_client=llm_client,
+        )
+        return _json_safe({"status": "ok", **result})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/ai/validate")
+async def ai_validate(request: ValidatorRequest):
+    """Audit an analysis (or the latest report for a ticker) and return a confidence score."""
+    try:
+        from ai.prompts.validator import analyze_validator
+
+        llm_client = None
+        if request.use_llm:
+            from ai.llm import LLMClient
+            llm_client = LLMClient()
+        result = analyze_validator(
+            ticker=request.ticker,
+            analysis=request.analysis,
+            use_llm=request.use_llm,
+            llm_client=llm_client,
+        )
+        return _json_safe({"status": "ok", **result})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/ai/validate/report")
+async def ai_validate_report(ticker: str, use_llm: bool = False):
+    """Validate the latest saved research report for a ticker."""
+    try:
+        from ai.prompts.validator import analyze_validator
+
+        llm_client = None
+        if use_llm:
+            from ai.llm import LLMClient
+            llm_client = LLMClient()
+        result = analyze_validator(ticker=ticker, use_llm=use_llm, llm_client=llm_client)
         return _json_safe({"status": "ok", **result})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -548,6 +607,25 @@ async def ai_screen_analysis(request: ScreenAnalysisRequest):
             )
             llm_analysis = llm_result.get("content") or llm_result.get("error") or ""
 
+        # Persist the AI screen analysis so it can be reviewed later (research
+        # memory for the screener). Store the deterministic results + LLM text.
+        analysis_id = None
+        try:
+            from database.scraper_store import ScraperDatabase
+
+            ticker_list = [r.get("ticker") for r in top if r.get("ticker")]
+            with ScraperDatabase() as store:
+                analysis_id = store.save_screen_analysis(
+                    screen_type=request.screen_type,
+                    filters=request.filters or [],
+                    question=request.question or "",
+                    tickers=ticker_list,
+                    results=top,
+                    llm_analysis=llm_analysis,
+                )
+        except Exception as e:
+            print(f"[screen-analysis] Failed to persist analysis: {e}")
+
         return _json_safe({
             "status": "ok",
             "screen_type": request.screen_type,
@@ -555,6 +633,24 @@ async def ai_screen_analysis(request: ScreenAnalysisRequest):
             "passed": len(passed),
             "results": top,
             "llm_analysis": llm_analysis,
+            "analysis_id": analysis_id,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/ai/screen-analysis/history")
+async def ai_screen_analysis_history(limit: int = 20):
+    """Return saved AI screen-analysis runs (newest first)."""
+    try:
+        from database.scraper_store import ScraperDatabase
+
+        with ScraperDatabase() as store:
+            analyses = store.get_screen_analyses(limit=max(1, min(limit, 100)))
+        return _json_safe({
+            "status": "ok",
+            "count": len(analyses),
+            "analyses": analyses,
         })
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -594,14 +690,27 @@ async def ai_macro_impact(request: MacroImpactRequest):
 
 
 @app.get("/research/candidates")
-async def research_candidates(hours: int = 48, status: str = "", ticker: str = "", sector: str = ""):
+async def research_candidates(
+    hours: int = 48,
+    status: str = "",
+    ticker: str = "",
+    sector: str = "",
+    rank: str = "",
+    filter: str = "",
+    min_validity: float = 70.0,
+):
     """Return deterministic research candidates (Fase B5).
 
     The sector/ticker/direction/confidence list is derived from the deterministic
     news_impacts snapshot (never invented by the LLM). Pass ``ticker`` and/or
     ``sector`` to filter to candidates relevant to a specific stock's own
     industry (Research tab). The per-batch LLM interpretation (if enabled in the
-    daily pipeline) is attached once.
+    daily pipeline) is attached once. Pass ``rank=validity`` to order the list
+    by the deterministic Result-Validator confidence score (descending),
+    prioritising the highest-quality analyses. Pass ``filter=bullish_validity``
+    to keep only ticker-level, bullish candidates whose validator score is at or
+    above ``min_validity`` (default 70 = HIGH), so the Research tab can separate
+    the strongest, well-supported ideas from bearish / unscored ones (Phase 18k).
     """
     try:
         from ai.data_loader_pg import get_data_loader
@@ -612,6 +721,9 @@ async def research_candidates(hours: int = 48, status: str = "", ticker: str = "
             status=status or None,
             ticker=ticker or None,
             sector=sector or None,
+            rank=rank or None,
+            filter=filter or None,
+            min_validity=min_validity,
         )
         # Carry the freshest LLM narrative from the batch as a single summary.
         llm_analysis = next(
@@ -623,6 +735,9 @@ async def research_candidates(hours: int = 48, status: str = "", ticker: str = "
             "hours": hours,
             "ticker": ticker,
             "sector": sector,
+            "rank": rank,
+            "filter": filter,
+            "min_validity": min_validity,
             "count": len(rows),
             "llm_used": bool(llm_analysis),
             "llm_analysis": llm_analysis,
@@ -711,18 +826,52 @@ def _research_report_to_dict(report) -> dict:
     }
 
 
+def _attach_validator(result: dict) -> dict:
+    """Enrich a report dict with a deterministic validator score (Phase 18k).
+
+    The score is attached before saving to research memory so each report
+    carries its own quality audit. Never raises: a validation failure simply
+    means no score is stored.
+    """
+    try:
+        from ai.prompts.validator import enrich_with_validator
+
+        return enrich_with_validator(result)
+    except Exception as e:
+        print(f"Validator enrichment skipped: {e}")
+        return result
+
+
+def _stamp_candidate_validity(ticker: str, result: dict) -> None:
+    """Stamp a saved report's validator score onto research_candidate rows.
+
+    Best-effort; a failure never surfaces to the user (the report is already
+    saved — this only feeds the validity-based ranking/filter).
+    """
+    try:
+        with ScraperDatabase() as store:
+            store.update_candidate_validity(
+                ticker,
+                result.get("validator_total"),
+                result.get("validator_tier", ""),
+            )
+    except Exception as e:
+        print(f"Candidate validity stamp skipped for {ticker}: {e}")
+
+
 @app.post("/ai/analyze", response_model=ResearchReportResponse)
 async def ai_analyze_stock(request: StockAnalysisRequest):
     """Analyze a stock using AI researcher."""
     try:
         report = analyze_stock(request.ticker, question=request.question)
-        result = _research_report_to_dict(report)
+        result = _attach_validator(_research_report_to_dict(report))
         # Persist to research memory so thesis history can be tracked over time.
         try:
             from ai.memory import save_research_report
             save_research_report(request.ticker, result, question=request.question or "")
         except Exception as mem_err:
             print(f"Research memory save skipped: {mem_err}")
+        _stamp_candidate_validity(request.ticker, result)
         return ResearchReportResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -765,8 +914,9 @@ async def generate_research(ticker: str, min_hours: int = 24, question: str = ""
                     pass
 
         report = _analyze(ticker, question=question or "")
-        result = _research_report_to_dict(report)
+        result = _attach_validator(_research_report_to_dict(report))
         save_research_report(ticker, result, question=question or "")
+        _stamp_candidate_validity(ticker, result)
         return _json_safe({"status": "generated", "report": result})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -963,11 +1113,127 @@ async def add_document(
 # =============================================================================
 
 @app.get("/stocks")
-async def list_stocks():
-    """List all stocks with latest price for the dashboard."""
+async def list_stocks(
+    page: int = 1,
+    limit: int = 0,
+    q: str = "",
+    sector: str = "",
+    sort: str = "",
+    dir: str = "asc",
+):
+    """List all stocks with latest price.
+
+    Server-side pagination/rfilter/sort: pass ``page``+``limit`` to fetch only a
+    slice (e.g. ``/stocks?page=1&limit=100``), ``q`` to filter by ticker/name,
+    ``sector`` to filter by sector, and ``sort``/``dir`` to order by a field.
+    If ``limit`` is 0 (default) the filtered full list is returned so existing
+    callers that need every ticker keep working. Response includes ``total``,
+    ``pages``, ``page``, ``limit`` for UI pagination.
+    """
     try:
         from ai.data_loader_pg import get_data_loader
-        return _json_safe({"status": "ok", "count": len(get_data_loader().list_stocks()), "stocks": get_data_loader().list_stocks()})
+        stocks = get_data_loader().list_stocks()
+        # Optional search / sector filter.
+        if q:
+            needle = q.strip().lower()
+            stocks = [
+                s for s in stocks
+                if needle in (s.get("ticker") or "").lower()
+                or needle in (s.get("name") or "").lower()
+            ]
+        if sector:
+            sector_set = {s.strip() for s in sector.split(",") if s.strip()}
+            stocks = [s for s in stocks if s.get("sector") in sector_set]
+        # Optional sort (ticker/name/sector/close/change/change_pct/volume).
+        if sort:
+            reverse = str(dir).lower() == "desc"
+            stocks.sort(
+                key=lambda s: (s.get(sort) is None, s.get(sort) or 0),
+                reverse=reverse,
+            )
+        total = len(stocks)
+        pages = 1
+        if limit and limit > 0:
+            page = max(1, int(page))
+            pages = max(1, (total + limit - 1) // limit)
+            page = min(page, pages)
+            start = (page - 1) * limit
+            stocks = stocks[start:start + limit]
+        return _json_safe({
+            "status": "ok",
+            "count": len(stocks),
+            "total": total,
+            "pages": pages,
+            "page": page,
+            "limit": limit,
+            "stocks": stocks,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/stocks/meta")
+async def stocks_meta():
+    """Header statistics + distinct sectors, without shipping every price row."""
+    try:
+        from ai.data_loader_pg import get_data_loader
+        stocks = get_data_loader().list_stocks()
+        priced = [s for s in stocks if s.get("close") is not None]
+        advancers = sum(1 for s in priced if (s.get("change") or 0) > 0)
+        decliners = sum(1 for s in priced if (s.get("change") or 0) < 0)
+        sectors = sorted({s.get("sector") for s in stocks if s.get("sector")})
+        return _json_safe({
+            "status": "ok",
+            "total": len(stocks),
+            "priced": len(priced),
+            "advancers": advancers,
+            "decliners": decliners,
+            "sectors": sectors,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/stocks/quote")
+async def stocks_quote(tickers: str):
+    """Batch price lookup for a comma-separated list of tickers.
+
+    Used by favorite cards and macro candidate cards so the UI never has to
+    load the entire stock list just to show a handful of prices.
+    """
+    try:
+        from ai.data_loader_pg import get_data_loader
+        wanted = {t.strip().upper() for t in tickers.split(",") if t.strip()}
+        out = {}
+        for s in get_data_loader().list_stocks():
+            if s.get("ticker") in wanted:
+                out[s["ticker"]] = s
+        return _json_safe({"status": "ok", "quotes": out})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/stocks/index")
+async def stocks_index(q: str = "", limit: int = 25):
+    """Lightweight ticker/name/sector index for search suggestions."""
+    try:
+        from ai.data_loader_pg import get_data_loader
+        rows = []
+        for s in get_data_loader().list_stocks():
+            rows.append({
+                "ticker": s.get("ticker"),
+                "name": s.get("name"),
+                "sector": s.get("sector"),
+            })
+        if q:
+            needle = q.strip().lower()
+            rows = [
+                r for r in rows
+                if needle in (r.get("ticker") or "").lower()
+                or needle in (r.get("name") or "").lower()
+            ]
+        rows = rows[: max(1, int(limit))] if limit and limit > 0 else rows
+        return _json_safe({"status": "ok", "count": len(rows), "rows": rows})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

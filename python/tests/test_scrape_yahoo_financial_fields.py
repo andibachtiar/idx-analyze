@@ -76,6 +76,7 @@ class TestFetchEnrichment:
         )
         # Add Net Income row too
         financials.loc["Net Income"] = [120.0, 100.0, 80.0]
+        financials.loc["Diluted EPS"] = [8.08, 7.4, 6.7]
         ticker.financials = financials
         with patch("scrape_yahoo_financial_fields.yf.Ticker", return_value=ticker):
             rec = scrub.fetch_enrichment("BBCA.JK")
@@ -83,6 +84,8 @@ class TestFetchEnrichment:
         assert rec["ticker"] == "BBCA"
         assert abs(rec["revenue_cagr"] - 0.10) < 1e-6  # (121/100)^(1/2)-1
         assert abs(rec["earnings_cagr"] - 0.224744871) < 1e-5
+        # (8.08/6.7)^(1/2)-1
+        assert abs(rec["eps_cagr"] - ((8.08 / 6.7) ** 0.5 - 1.0)) < 1e-6
         # dividend_yield is returned raw (fraction); store converts to percent
         assert abs(rec["dividend_yield"] - 0.05) < 1e-6
 

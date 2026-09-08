@@ -465,5 +465,67 @@ We recommend a buy for long-term investors.
         assert report.overall_verdict == "BUY"
 
 
+class TestConfidenceCalculation:
+    """Deterministic confidence must reflect data completeness (not a hardcoded 0.5)."""
+
+    def _researcher(self):
+        return AIResearcher()
+
+    def _metric(self, value):
+        return {"value": value, "is_available": value is not None}
+
+    def test_complete_data_scores_high(self):
+        r = self._researcher()
+        confidence = r._calculate_confidence(
+            price_data={"price": 1000.0},
+            fundamental_data={
+                "growth": {"revenue_cagr_3y": self._metric(0.1)},
+                "profitability": {"roe": self._metric(0.2)},
+                "financial_health": {"current_ratio": self._metric(1.5)},
+                "cash_flow": {"fcf_margin": self._metric(0.1)},
+            },
+            valuation_data={"valuations": {"pe_ratio": {"value": 12.0}}, "historical_comparison": {"pe_ratio": {}}},
+            technical_data={"indicators": {"rsi_14": self._metric(55)}},
+            company_info={"name": "PT X", "sector": "Consumer"},
+            news_data={"news": [{"title": "a"}]},
+        )
+        assert confidence > 0.5
+        assert confidence <= 1.0
+
+    def test_sparse_data_scores_low(self):
+        r = self._researcher()
+        confidence = r._calculate_confidence(
+            price_data={},
+            fundamental_data={},
+            valuation_data={},
+            technical_data={},
+            company_info={},
+            news_data={},
+        )
+        assert confidence == 0.0
+
+    def test_not_all_reports_equal_half(self):
+        """Different data completeness must yield distinct confidence values."""
+        r = self._researcher()
+        rich = r._calculate_confidence(
+            price_data={"price": 100},
+            fundamental_data={"profitability": {"roe": self._metric(0.2)}},
+            valuation_data={},
+            technical_data={"indicators": {"sma_20": self._metric(90)}},
+            company_info={"name": "X"},
+            news_data={"news": [{"title": "a"}]},
+        )
+        poor = r._calculate_confidence(
+            price_data={"price": 100},
+            fundamental_data={},
+            valuation_data={},
+            technical_data={},
+            company_info={},
+            news_data={},
+        )
+        assert rich != poor
+        assert rich > poor
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

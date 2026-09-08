@@ -28,6 +28,19 @@ class FundamentalAnalysisRequest(BaseModel):
     use_llm: bool = Field(False, description="Include LLM interpretation of the ratios")
 
 
+class DividendAnalysisRequest(BaseModel):
+    """Request for deterministic dividend-quality analysis + optional LLM."""
+    ticker: str = Field(..., description="Stock ticker symbol")
+    use_llm: bool = Field(False, description="Include LLM interpretation of the dividend metrics")
+
+
+class ValidatorRequest(BaseModel):
+    """Request to audit an analysis or the latest report for a ticker."""
+    ticker: str = Field("", description="Ticker to validate the latest saved report for (if analysis not given)")
+    analysis: Optional[Dict[str, Any]] = Field(None, description="Analysis dict to audit directly")
+    use_llm: bool = Field(False, description="Include LLM meta-analysis on top of deterministic scores")
+
+
 class StockComparisonRequest(BaseModel):
     """Request for stock comparison."""
     tickers: List[str] = Field(..., description="List of ticker symbols")

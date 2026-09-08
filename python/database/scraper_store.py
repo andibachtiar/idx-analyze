@@ -37,7 +37,10 @@ class ScraperDatabase:
             raise RuntimeError("psycopg2 is not installed; run uv sync")
         if not self.database_url:
             raise RuntimeError("DATABASE_URL is not set in the project .env")
-        self.connection = psycopg2.connect(self.database_url)
+        # connect_timeout fails fast instead of hanging indefinitely when the DB
+        # is unreachable (e.g. host not resolvable from a test runner) — without
+        # it psycopg2 blocks on the TCP handshake with no upper bound.
+        self.connection = psycopg2.connect(self.database_url, connect_timeout=10)
 
     def close(self) -> None:
         if self.connection and not self.connection.closed:
@@ -257,6 +260,20 @@ class ScraperDatabase:
         self.connection.commit()
         return len(rows)
 
+    def _ensure_eps_cagr_column(self) -> None:
+        """Add the eps_cagr column if it does not yet exist (Phase D3b).
+
+        Idempotent self-contained guard so the enrichment write works even
+        before/without the migration runner applying ``202609090019``.
+        """
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE financial_ratios ADD COLUMN IF NOT EXISTS eps_cagr NUMERIC"
+            )
+        self.connection.commit()
+
     def update_financial_enrichments(
         self,
         records: Iterable[dict[str, Any]],
@@ -265,12 +282,13 @@ class ScraperDatabase:
 
         Enrichment values (e.g. from yfinance) fill in fields the IDX ratios
         source leaves empty: dividend_yield, current_ratio, payout_ratio, growth
-        CAGRs (revenue_cagr, earnings_cagr), and the cash-flow/interest
+        CAGRs (revenue_cagr, earnings_cagr, eps_cagr), and the cash-flow/interest
         components (gross_profit, cash_and_equivalents, interest_expense,
         operating_cash_flow, capital_expenditures) that let the analysis engine
         derive gross margin, interest coverage, net debt/EBITDA and FCF margin.
         Only the tagged value columns are updated; other ratio data is kept.
         """
+        self._ensure_eps_cagr_column()
         rows = []
         for item in records:
             ticker = item.get("ticker") or item.get("symbol") or item.get("Symbol")
@@ -291,7 +309,9 @@ class ScraperDatabase:
                 _number(item.get("payout_ratio") or item.get("payoutRatio")),
                 _number(item.get("revenue_cagr")),
                 _number(item.get("earnings_cagr")),
+                _number(item.get("eps_cagr")),
                 _number(item.get("gross_profit") or item.get("grossProfit")),
+                _number(item.get("operating_income") or item.get("operatingIncome")),
                 _number(item.get("cash_and_equivalents") or item.get("cash")),
                 _number(item.get("interest_expense")),
                 _number(item.get("operating_cash_flow")),
@@ -308,7 +328,9 @@ class ScraperDatabase:
                     payout_ratio = data.payout_ratio::numeric,
                     revenue_cagr = data.revenue_cagr::numeric,
                     earnings_cagr = data.earnings_cagr::numeric,
+                    eps_cagr = data.eps_cagr::numeric,
                     gross_profit = data.gross_profit::numeric,
+                    operating_income = data.operating_income::numeric,
                     cash_and_equivalents = data.cash_and_equivalents::numeric,
                     interest_expense = data.interest_expense::numeric,
                     operating_cash_flow = data.operating_cash_flow::numeric,
@@ -316,9 +338,9 @@ class ScraperDatabase:
                     updated_at = CURRENT_TIMESTAMP
                 FROM (VALUES %s) AS data(ticker, dividend_yield, current_ratio,
                                          payout_ratio, revenue_cagr, earnings_cagr,
-                                         gross_profit, cash_and_equivalents,
-                                         interest_expense, operating_cash_flow,
-                                         capital_expenditures)
+                                         eps_cagr, gross_profit, operating_income,
+                                         cash_and_equivalents, interest_expense,
+                                         operating_cash_flow, capital_expenditures)
                 WHERE fr.ticker = data.ticker
                   AND fr.fiscal_year = (
                       SELECT MAX(fiscal_year) FROM financial_ratios f2
@@ -434,6 +456,95 @@ class ScraperDatabase:
             )
             return [row[0] for row in cursor.fetchall()]
 
+    def _ensure_screen_analyses_table(self) -> None:
+        """Create the screen_analyses table if it does not yet exist.
+
+        Idempotent guard so the API works even before/without the migration
+        runner applying ``202609080016`` (keeps the persistence self-contained).
+        """
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screen_analyses (
+                    id BIGSERIAL PRIMARY KEY,
+                    screen_type VARCHAR(50),
+                    filters JSONB NOT NULL DEFAULT '[]',
+                    question TEXT,
+                    tickers JSONB NOT NULL DEFAULT '[]',
+                    results JSONB NOT NULL DEFAULT '[]',
+                    llm_analysis TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        self.connection.commit()
+
+    def save_screen_analysis(
+        self,
+        screen_type: str | None,
+        filters: list[dict[str, Any]],
+        question: str,
+        tickers: list[str],
+        results: list[dict[str, Any]],
+        llm_analysis: str,
+    ) -> int:
+        """Persist one AI screen-analysis run; returns the new row id."""
+        self._ensure_screen_analyses_table()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO screen_analyses
+                    (screen_type, filters, question, tickers, results, llm_analysis)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    screen_type,
+                    json.dumps(filters or []),
+                    question or "",
+                    json.dumps(tickers or []),
+                    json.dumps(results or []),
+                    llm_analysis or "",
+                ),
+            )
+            row = cursor.fetchone()
+        self.connection.commit()
+        return int(row[0]) if row else 0
+
+    def get_screen_analyses(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return saved AI screen-analysis runs, newest first."""
+        self._ensure_screen_analyses_table()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, screen_type, filters, question, tickers, results,
+                       llm_analysis, created_at
+                FROM screen_analyses
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (int(limit),),
+            )
+            cols = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+        out = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            for k in ("filters", "tickers", "results"):
+                v = d.get(k)
+                if isinstance(v, str):
+                    try:
+                        d[k] = json.loads(v)
+                    except (ValueError, TypeError):
+                        d[k] = []
+            d["created_at"] = str(d["created_at"])
+            out.append(d)
+        return out
+
     def upsert_research_candidates(
         self,
         candidates: Iterable[dict[str, Any]],
@@ -532,6 +643,55 @@ class ScraperDatabase:
             cursor.execute(query, params)
             cols = [d[0] for d in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def _ensure_research_validator_columns(self) -> None:
+        """Add validator score columns to research_candidates (Phase 18k).
+
+        Idempotent self-contained guard so the ranking/filter works even
+        before/without the migration runner applying ``202609090018``.
+        """
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE research_candidates "
+                "ADD COLUMN IF NOT EXISTS validator_score NUMERIC(5, 2)"
+            )
+            cursor.execute(
+                "ALTER TABLE research_candidates "
+                "ADD COLUMN IF NOT EXISTS validator_tier VARCHAR(20)"
+            )
+        self.connection.commit()
+
+    def update_candidate_validity(
+        self,
+        ticker: str,
+        total: int | None,
+        tier: str = "",
+    ) -> int:
+        """Stamp a validated scores onto the latest candidate rows for a ticker.
+
+        A ticker can appear in several sector/direction rows, so all rows for the
+        most recent candidate_date are updated at once. Returns number of rows
+        updated (0 if the ticker is not currently a candidate).
+        """
+        self._ensure_research_validator_columns()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE research_candidates
+                SET validator_score = %s,
+                    validator_tier = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ticker = %s
+                  AND candidate_date = (SELECT MAX(candidate_date) FROM research_candidates)
+                """,
+                (float(total) if total is not None else None, tier or None, ticker.upper()),
+            )
+            updated = cursor.rowcount
+        self.connection.commit()
+        return int(updated)
 
     def add_favorite(self, ticker: str) -> bool:
         """Add a ticker to favorites. Returns True when newly added, False if it already existed."""
