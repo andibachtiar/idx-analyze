@@ -343,6 +343,27 @@ export LLM_TEMPERATURE="0.3"  # default temperature
 export LLM_MAX_TOKENS="4096"  # default max tokens
 ```
 
+## Two-tier model routing
+
+High-reasoning tasks (comprehensive research reports, stock comparison, thesis
+validation) use the **STRONG** tier; quick, lower-reasoning summaries
+(fundamental/dividend/valuation/technical/screen/macro) use the **FAST** tier.
+
+```bash
+# Optional. When unset, each tier falls back to OPENAI_MODEL (then gpt-4o), so
+# a single-model deployment behaves exactly as before.
+export OPENAI_MODEL_STRONG="gpt-5"        # e.g. comprehensive reports
+export OPENAI_MODEL_FAST="gpt-4o-mini"   # e.g. quick metric summaries
+export OPENAI_TIMEOUT="120"               # per-request seconds (LLMClient)
+export OPENAI_TOTAL_TIMEOUT="600"         # wall-clock budget incl. retries (researcher)
+```
+
+Resolution order per tier: `OPENAI_MODEL_STRONG`/`OPENAI_MODEL_FAST`, then
+`OPENAI_MODEL`, then `gpt-4o`. Helpers in `ai.llm`:
+
+- `resolve_model(tier)` — pick the model for a tier from the environment.
+- `llm_client_for(tier, **kwargs)` — build an `LLMClient` for a tier.
+
 ## Supported LLM Providers
 
 | Provider     | Base URL                       | Notes               |

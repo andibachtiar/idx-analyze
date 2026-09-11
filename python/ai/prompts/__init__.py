@@ -54,15 +54,46 @@ When data is unavailable, clearly state:
 
 Always cite your data sources and timestamps."""
 
-# Prompt for initial stock analysis
-INITIAL_ANALYSIS_PROMPT = """Analyze the stock {ticker} based on the following question:
+# Canonical section headings for the research report. Used both for the LLM
+# instructions and for REPORT_TEMPLATE so the two can never drift apart: the
+# parser keys off these exact titles.
+REPORT_SECTION_HEADINGS = (
+    ("Executive Summary", "executive_summary"),
+    ("Business Quality", "business_quality"),
+    ("Growth Analysis", "growth_analysis"),
+    ("Profitability", "profitability"),
+    ("Financial Health", "financial_health"),
+    ("Valuation", "valuation"),
+    ("Technical Position", "technical_position"),
+    ("Recent Events & Catalysts", "recent_events"),
+    ("Risks", "risks"),
+    ("Bull Case", "bull_case"),
+    ("Base Case", "base_case"),
+    ("Bear Case", "bear_case"),
+    ("Conclusion", "conclusion"),
+)
 
-{question}
+_REPORT_HEADING_LINES = "\n".join(
+    f"## {title}" for title, _ in REPORT_SECTION_HEADINGS
+)
 
-Available data has been retrieved from our analysis engines. Use ONLY the data provided - do not make up numbers.
-
-Provide a structured analysis following the research report format.
-"""
+# Prompt for initial stock analysis. The required headings are inlined so the LLM
+# emits sections the parser can map deterministically; without them the model
+# invents its own structure and most sections end up empty.
+INITIAL_ANALYSIS_PROMPT = (
+    "Analyze the stock {ticker} based on the following question:\n\n"
+    "{question}\n\n"
+    "Available data has been retrieved from our analysis engines. Use ONLY the "
+    "data provided - do not make up numbers.\n\n"
+    "Write the report in markdown using EXACTLY these section headings, in this "
+    "order. Do not add, rename, merge, or reorder headings, and do not use any "
+    "other top-level (##) headings:\n\n"
+    f"{_REPORT_HEADING_LINES}\n\n"
+    "Tag every material statement inline with one of [FACT], [INTERPRETATION], "
+    "[ASSUMPTION], or [SPECULATION]. Every section must contain content; when "
+    "data is unavailable for a section, say so explicitly instead of omitting "
+    "the section.\n"
+)
 
 # Prompt for comparing stocks
 COMPARISON_PROMPT = """Compare the following stocks: {tickers}
@@ -84,54 +115,17 @@ Check each claim against the available data. Identify:
 4. Key risks that could invalidate the thesis
 """
 
-# Template for structured report output
-REPORT_TEMPLATE = """
-# Investment Research Report: {ticker}
-
-## Executive Summary
-{executive_summary}
-
-## Business Quality
-{business_quality}
-
-## Growth Analysis
-{growth_analysis}
-
-## Profitability
-{profitability}
-
-## Financial Health
-{financial_health}
-
-## Valuation
-{valuation}
-
-## Technical Position
-{technical_position}
-
-## Recent Events & Catalysts
-{recent_events}
-
-## Risks
-{risks}
-
-## Bull Case
-{bull_case}
-
-## Base Case
-{base_case}
-
-## Bear Case
-{bear_case}
-
-## Conclusion
-{conclusion}
-
----
-**Data Timestamp:** {timestamp}
-**Sources:** {sources}
-**Confidence:** {confidence}
-"""
+# Template for structured report output. Built from REPORT_SECTION_HEADINGS so
+# the placeholders ({executive_summary}, ...) match the parser's section keys.
+REPORT_TEMPLATE = (
+    "# Investment Research Report: {ticker}\n\n"
+    + "\n\n".join(
+        f"## {title}\n{{{key}}}" for title, key in REPORT_SECTION_HEADINGS
+    )
+    + "\n\n---\n**Data Timestamp:** {timestamp}\n"
+    "**Sources:** {sources}\n"
+    "**Confidence:** {confidence}\n"
+)
 
 # =============================================================================
 # VALUATION PROMPTS (from prompts/valuation.py)
@@ -226,6 +220,7 @@ __all__ = [
     "COMPARISON_PROMPT",
     "THESIS_VALIDATION_PROMPT",
     "REPORT_TEMPLATE",
+    "REPORT_SECTION_HEADINGS",
     # Valuation
     "WACCCalculation",
     "ValuationResult",

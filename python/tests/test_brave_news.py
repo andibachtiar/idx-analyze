@@ -186,6 +186,75 @@ class _FakeStore:
         return False
 
 
+class _CaptureStore(_FakeStore):
+    """Fake store that records inserted news and serves company names."""
+
+    def __init__(self, names=None):
+        self.inserted = []
+        self._names = names or {}
+
+    def get_company_names(self, tickers):
+        return {str(t).upper(): self._names.get(str(t).upper(), str(t).upper()) for t in tickers}
+
+    def insert_news(self, records):
+        records = list(records)
+        self.inserted.extend(records)
+        return len(records)
+
+
+class TestRelevanceGate:
+    """Brave tags every result with the query ticker; the gate must drop the
+    unrelated ones (backlog #3)."""
+
+    def _cfg(self):
+        return {"count": 5, "country": "id", "lang": "", "sources": []}
+
+    def _item(self, title):
+        return {
+            "title": title,
+            "url": "https://investing.com/" + title.lower().replace(" ", "-")[:40],
+            "description": "",
+            "profile": {"name": "Investing.com"},
+            "meta_url": {"hostname": "investing.com"},
+        }
+
+    def test_drops_irrelevant_items_and_keeps_relevant(self):
+        store = _CaptureStore()
+        items = [
+            self._item("SICO (Sigma Energy Compressindo) ekspansi pabrik"),
+            self._item("Mengapa saham Sigma Lithium turun hari ini?"),
+            self._item("Saham SigmaRoc melonjak 12%"),
+        ]
+        n = s._filter_and_insert(store, self._cfg(), items, "SICO", "Sigma Energy Compressindo")
+        assert n == 1
+        assert len(store.inserted) == 1
+        assert "SICO (Sigma" in store.inserted[0]["title"]
+
+    def test_gate_is_skipped_for_macro_news(self):
+        """ticker=None (macro) has nothing to attribute, so nothing is dropped."""
+        store = _CaptureStore()
+        items = [self._item("BI naikkan suku bunga"), self._item("IHSG melemah")]
+        n = s._filter_and_insert(store, self._cfg(), items, None, None)
+        assert n == 2
+
+    def test_scrape_passes_company_names_to_the_gate(self, monkeypatch):
+        cfg = {"api_key": "k", "url": "https://x", "count": 5, "country": "id",
+               "lang": "", "sources": [], "macro_queries": []}
+        monkeypatch.setattr(s, "get_config", lambda: cfg)
+        store = _CaptureStore({"SICO": "Sigma Energy Compressindo"})
+        monkeypatch.setattr(s, "ScraperDatabase", lambda: store)
+        monkeypatch.setattr(
+            s, "fetch_brave_news",
+            lambda c, q: [
+                {"title": "SICO raih kontrak", "url": "https://x/1"},
+                {"title": "SigmaRoc melonjak", "url": "https://x/2"},
+            ],
+        )
+        n = s.scrape_brave_news(tickers=["SICO"], delay=0)
+        assert n == 1
+        assert [r["title"] for r in store.inserted] == ["SICO raih kontrak"]
+
+
 class TestMacro:
     def test_normalize_item_none_ticker_for_macro(self):
         """Macro/general news is stored without a ticker (NULL)."""

@@ -25,6 +25,97 @@ except ImportError:  # pragma: no cover
     execute_values = None
 
 
+# Column order for financial_ratios inserts. Kept in one place so the INSERT,
+# the conflict target and the NULL-safe DO UPDATE SET can never drift apart.
+_FINANCIAL_RATIO_COLUMNS = (
+    "ticker",
+    "fiscal_year",
+    "fiscal_period",
+    "period_end",
+    "revenue",
+    "cost_of_goods_sold",
+    "gross_profit",
+    "operating_income",
+    "net_income",
+    "eps",
+    "total_assets",
+    "total_liabilities",
+    "total_equity",
+    "cash_and_equivalents",
+    "total_debt",
+    "gross_margin",
+    "operating_margin",
+    "net_margin",
+    "roe",
+    "roa",
+    "roic",
+    "debt_to_equity",
+    "current_ratio",
+    "interest_coverage",
+    "pe_ratio",
+    "pb_ratio",
+    "ev_ebitda",
+    "dividend_yield",
+    "source",
+)
+
+# Mirrors the unique expression index financial_ratios_period_uniq_idx (see
+# migration 202609100020). fiscal_period is COALESCEd because it is NULL for
+# IDX annual rows and PostgreSQL treats NULLs as distinct in a unique index.
+_FINANCIAL_RATIO_CONFLICT = (
+    "(ticker, fiscal_year, (COALESCE(fiscal_period, 0)), period_end)"
+)
+_FINANCIAL_RATIO_KEY = {"ticker", "fiscal_year", "fiscal_period", "period_end"}
+
+
+def _dedupe_ratio_rows(rows, columns=_FINANCIAL_RATIO_COLUMNS):
+    """Collapse rows sharing the conflict key, merging non-NULL values.
+
+    PostgreSQL raises "ON CONFLICT DO UPDATE command cannot affect row a second
+    time" when one INSERT batch contains two rows for the same conflict key.
+    Returns one merged row per key: the last non-NULL value wins, while the
+    order of first appearance is preserved.
+    """
+    index = {name: i for i, name in enumerate(columns)}
+    ticker_idx = index["ticker"]
+    year_idx = index["fiscal_year"]
+    period_idx = index["fiscal_period"]
+    period_end_idx = index["period_end"]
+
+    merged: dict[tuple, list] = {}
+    order: list[tuple] = []
+    for row in rows:
+        key = (
+            row[ticker_idx],
+            row[year_idx],
+            row[period_idx] if row[period_idx] is not None else 0,
+            row[period_end_idx],
+        )
+        if key not in merged:
+            merged[key] = list(row)
+            order.append(key)
+        else:
+            current = merged[key]
+            for i, value in enumerate(row):
+                if value is not None:
+                    current[i] = value
+    return [tuple(merged[key]) for key in order]
+
+
+def _financial_ratio_update_assignments(columns=_FINANCIAL_RATIO_COLUMNS) -> str:
+    """Build a NULL-safe DO UPDATE SET clause for financial_ratios.
+
+    A later scrape (e.g. yfinance enrichment) legitimately leaves most columns
+    NULL. A raw ``col = EXCLUDED.col`` would wipe values the other source had
+    already stored, so every assignment falls back to the existing row.
+    """
+    return ", ".join(
+        f"{column} = COALESCE(EXCLUDED.{column}, financial_ratios.{column})"
+        for column in columns
+        if column not in _FINANCIAL_RATIO_KEY and column != "source"
+    )
+
+
 class ScraperDatabase:
     """Small database adapter used by scraper scripts."""
 
@@ -123,8 +214,13 @@ class ScraperDatabase:
                 continue
             period_end = _date(item.get("fsDate") or item.get("period_end"))
             fiscal_year = _int(item.get("fiscalYear")) or (period_end.year if period_end else None)
+            fiscal_period = _int(item.get("fiscalPeriod"))
+            if fiscal_period is None and period_end:
+                # IDX rows carry no explicit quarter; recover it from the
+                # period-end date (Mar=Q1, Jun=Q2, Sep=Q3; Dec=annual).
+                fiscal_period = _period_from_date(period_end)
             rows.append((
-                str(ticker).upper(), fiscal_year, _int(item.get("fiscalPeriod")), period_end,
+                str(ticker).upper(), fiscal_year, fiscal_period, period_end,
                 _number(item.get("sales")), _number(item.get("cogs")), _number(item.get("grossProfit")),
                 _number(item.get("ebt")), _number(item.get("profitAttrOwner") or item.get("profitPeriod")),
                 _number(item.get("eps")), _number(item.get("assets")), _number(item.get("liabilities")),
@@ -137,30 +233,17 @@ class ScraperDatabase:
             ))
         if not rows:
             return 0
+        # Collapse duplicate conflict keys inside the batch: ON CONFLICT DO
+        # UPDATE cannot touch the same row twice in a single command.
+        rows = _dedupe_ratio_rows(rows)
         self._ensure_connection()
+        assignments = _financial_ratio_update_assignments()
         with self.connection.cursor() as cursor:
-            execute_values(cursor, """
-                INSERT INTO financial_ratios
-                (ticker, fiscal_year, fiscal_period, period_end, revenue, cost_of_goods_sold,
-                 gross_profit, operating_income, net_income, eps, total_assets, total_liabilities,
-                 total_equity, cash_and_equivalents, total_debt, gross_margin, operating_margin,
-                 net_margin, roe, roa, roic, debt_to_equity, current_ratio, interest_coverage,
-                 pe_ratio, pb_ratio, ev_ebitda, dividend_yield, source)
+            execute_values(cursor, f"""
+                INSERT INTO financial_ratios ({', '.join(_FINANCIAL_RATIO_COLUMNS)})
                 VALUES %s
-                ON CONFLICT (ticker, fiscal_year, fiscal_period) DO UPDATE SET
-                    period_end = EXCLUDED.period_end,
-                    revenue = EXCLUDED.revenue,
-                    operating_income = EXCLUDED.operating_income,
-                    net_income = EXCLUDED.net_income,
-                    eps = EXCLUDED.eps,
-                    total_assets = EXCLUDED.total_assets,
-                    total_liabilities = EXCLUDED.total_liabilities,
-                    total_equity = EXCLUDED.total_equity,
-                    net_margin = EXCLUDED.net_margin,
-                    roe = EXCLUDED.roe,
-                    roa = EXCLUDED.roa,
-                    pe_ratio = EXCLUDED.pe_ratio,
-                    pb_ratio = EXCLUDED.pb_ratio,
+                ON CONFLICT {_FINANCIAL_RATIO_CONFLICT} DO UPDATE SET
+                    {assignments},
                     updated_at = CURRENT_TIMESTAMP
             """, rows)
         self.connection.commit()
@@ -455,6 +538,24 @@ class ScraperDatabase:
                 "SELECT ticker FROM favorites ORDER BY position ASC, created_at ASC"
             )
             return [row[0] for row in cursor.fetchall()]
+
+    def get_company_names(self, tickers: Iterable[str]) -> dict[str, str]:
+        """Return a ``{ticker: name}`` map for the given tickers.
+
+        Used by news relevance gating to match an article against the company
+        name, not just the ticker. Unknown tickers are simply absent.
+        """
+        wanted = {str(t).upper() for t in tickers if t}
+        if not wanted:
+            return {}
+        self._ensure_connection()
+        assert self.connection is not None
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT ticker, name FROM companies WHERE ticker = ANY(%s)",
+                (list(wanted),),
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
 
     def _ensure_screen_analyses_table(self) -> None:
         """Create the screen_analyses table if it does not yet exist.
@@ -866,6 +967,24 @@ def _number(value: Any) -> float | None:
 def _int(value: Any) -> int | None:
     number = _number(value)
     return int(number) if number is not None else None
+
+
+def _period_from_date(period_end: date | None) -> int | None:
+    """Derive a fiscal period (1..3) from a period-end date, else None.
+
+    IDX reports quarterly snapshots with period ends on Mar 31 / Jun 30 /
+    Sep 30 and an annual snapshot on Dec 31. ``fiscal_period`` is NULL for
+    these rows (the IDX JSON feed does not carry an explicit quarter), so the
+    quarter is recovered from the month of ``period_end``. December is left as
+    None because it represents the full fiscal year (annual), matching the
+    heuristic in ``analysis/historical.py``.
+    """
+    if period_end is None:
+        return None
+    month = period_end.month
+    if month in (3, 6, 9):
+        return {3: 1, 6: 2, 9: 3}[month]
+    return None
 
 
 def _date(value: Any) -> date | None:

@@ -503,6 +503,174 @@ class TestCalculateAllMetrics:
             if key in ("gross_margin", "operating_margin", "net_margin"):
                 assert result.value is None or not result.is_available
 
+    def test_stored_debt_to_equity_preferred_over_recompute(self):
+        """A stored D/E is used when raw total_debt is missing.
+
+        The DB stores the ratio directly while total_debt is often NULL, so
+        recomputing from components would wrongly drop a known value.
+        """
+        metrics = FinancialMetrics(
+            revenue=10000.0,
+            net_income=1500.0,
+            total_equity=10000.0,
+            total_debt=None,          # raw component missing
+            debt_to_equity=0.18,      # stored ratio present
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["debt_to_equity"].value == 0.18
+        assert results["debt_to_equity"].is_available
+
+    def test_recomputed_debt_to_equity_when_not_stored(self):
+        """D/E falls back to total_debt/total_equity when nothing is stored."""
+        metrics = FinancialMetrics(
+            net_income=1500.0,
+            total_equity=10000.0,
+            total_debt=2500.0,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["debt_to_equity"].value == 0.25
+
+    def test_stored_roe_and_roa_preferred_over_recompute(self):
+        """Stored ROE/ROA (official IDX figures) win over recomputation.
+
+        The components imply 0.15/0.075, but the stored ratios are authoritative
+        and must be surfaced so the report matches the published figure.
+        """
+        metrics = FinancialMetrics(
+            revenue=10000.0,
+            net_income=1500.0,
+            total_assets=20000.0,
+            total_equity=10000.0,
+            roe=0.185,
+            roa=0.084,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["roe"].value == 0.185
+        assert results["roa"].value == 0.084
+        assert results["roe"].is_available
+        assert results["roa"].is_available
+
+    def test_roe_and_roa_recomputed_when_not_stored(self):
+        """ROE/ROA fall back to components when no stored ratio exists."""
+        metrics = FinancialMetrics(
+            net_income=1500.0,
+            total_assets=20000.0,
+            total_equity=10000.0,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["roe"].value == 0.15
+        assert results["roa"].value == 0.075
+
+    def test_exposes_component_roe_roa_beside_stored(self):
+        """The component-derived ROE/ROA is exposed next to the stored one.
+
+        Both bases stay visible so a reader can reconcile them instead of
+        assuming the headline value is the only truth.
+        """
+        metrics = FinancialMetrics(
+            revenue=10000.0,
+            net_income=1500.0,
+            total_assets=20000.0,
+            total_equity=10000.0,
+            roe=0.185,
+            roa=0.084,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["roe"].value == 0.185           # stored (data source)
+        assert results["roe_components"].value == 0.15  # 1500 / 10000
+        assert results["roa"].value == 0.084            # stored (data source)
+        assert results["roa_components"].value == 0.075  # 1500 / 20000
+
+    def test_component_companions_match_when_nothing_stored(self):
+        """Without a stored ratio the companion equals the headline metric."""
+        metrics = FinancialMetrics(
+            net_income=1500.0,
+            total_assets=20000.0,
+            total_equity=10000.0,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["roe"].value == results["roe_components"].value == 0.15
+        assert results["roa"].value == results["roa_components"].value == 0.075
+
+    def test_exposes_component_margins_beside_stored(self):
+        """Stored margins are preferred and the component value is exposed too."""
+        metrics = FinancialMetrics(
+            revenue=10000.0,
+            gross_profit=4000.0,      # component gross margin 0.40
+            operating_income=1500.0,  # component operating margin 0.15
+            net_income=1200.0,        # component net margin 0.12
+            gross_margin=0.42,
+            operating_margin=0.17,
+            net_margin=0.15,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["gross_margin"].value == 0.42
+        assert results["gross_margin_components"].value == 0.40
+        assert results["operating_margin"].value == 0.17
+        assert results["operating_margin_components"].value == 0.15
+        assert results["net_margin"].value == 0.15
+        assert results["net_margin_components"].value == 0.12
+
+    def test_margin_components_match_when_nothing_stored(self):
+        """Margin companions equal the headline metric when nothing is stored."""
+        metrics = FinancialMetrics(
+            revenue=10000.0,
+            gross_profit=4000.0,
+            operating_income=1500.0,
+            net_income=1200.0,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["gross_margin"].value == results["gross_margin_components"].value == 0.40
+        assert results["net_margin"].value == results["net_margin_components"].value == 0.12
+
+    def test_exposes_component_roic_beside_stored(self):
+        """Stored ROIC is preferred and the component value is exposed too."""
+        metrics = FinancialMetrics(
+            net_income=1200.0,
+            total_equity=8000.0,
+            total_debt=2000.0,  # component ROIC = 1200 / 10000 = 0.12
+            roic=0.10,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["roic"].value == 0.10
+        assert results["roic_components"].value == 0.12
+
+    def test_stored_roic_used_when_total_debt_missing(self):
+        """A stored ROIC survives when the recomputation cannot run.
+
+        Without ``total_debt`` the component calculation is unavailable, so the
+        stored figure must still be surfaced (and the companion reports None).
+        """
+        metrics = FinancialMetrics(
+            net_income=1200.0,
+            total_equity=8000.0,
+            total_debt=None,
+            roic=0.11,
+        )
+
+        results = calculate_all_metrics(metrics, "2024")
+
+        assert results["roic"].value == 0.11
+        assert results["roic_components"].value is None
+
 
 class TestCalculateGrowthMetrics:
     """Tests for growth metrics calculation."""

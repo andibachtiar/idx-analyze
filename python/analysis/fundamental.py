@@ -664,6 +664,56 @@ def _stored_cagr(value, metric_name: str) -> MetricResult:
     )
 
 
+def _prefer_stored(stored: Optional[float], metric_name: str, computed: MetricResult) -> MetricResult:
+    """Prefer a ratio stored by the data source over a recomputed one.
+
+    The database stores official ratios (ROE/ROA/D-E/current ratio) that may
+    differ from a recomputation using the period's raw components — IDX may use
+    average equity, a different period definition, or a different unit. Using
+    the stored figure keeps the report aligned with the published value; the
+    component-based calculation is the fallback when nothing is stored.
+
+    Args:
+        stored: Ratio value already present on the metrics (None when absent)
+        metric_name: Name to tag the result with
+        computed: Component-based MetricResult used when nothing is stored
+    """
+    if stored is not None:
+        return MetricResult(
+            value=float(stored),
+            metric_name=metric_name,
+            formula="(from data source)",
+            notes=(
+                "Reported by the data source; may differ from the component-derived "
+                "value in the companion *_components metric."
+            ),
+        )
+    return computed
+
+
+def _components_result(result: MetricResult, metric_name: str) -> MetricResult:
+    """Relabel a component-derived ratio so it can sit beside a stored one.
+
+    Emitted as ``roe_components`` / ``roa_components`` so a reader (or the LLM)
+    can compare the two bases instead of treating one as the single truth. When
+    the data source stores no ratio the companion equals the headline metric —
+    that is intentional and shows both bases agree.
+    """
+    note = (
+        "Component-derived from this period's figures; the data source may "
+        "report a different value."
+    )
+    if result.notes:
+        note = f"{result.notes} {note}"
+    return MetricResult(
+        value=result.value,
+        metric_name=metric_name,
+        period=result.period,
+        formula=result.formula,
+        notes=note,
+    )
+
+
 def calculate_all_metrics(metrics: FinancialMetrics, period_label: str = "") -> dict:
     """
     Calculate all fundamental metrics from a FinancialMetrics object.
@@ -681,19 +731,64 @@ def calculate_all_metrics(metrics: FinancialMetrics, period_label: str = "") -> 
     results = {}
 
     # Profitability metrics
-    results["gross_margin"] = gross_margin(metrics.gross_profit, metrics.revenue)
-    results["operating_margin"] = operating_margin(metrics.operating_income, metrics.revenue)
-    results["net_margin"] = net_margin(metrics.net_income, metrics.revenue)
-    results["roe"] = roe(metrics.net_income, metrics.total_equity)
-    results["roa"] = roa(metrics.net_income, metrics.total_assets)
-    results["roic"] = roic(
+    # Margins: prefer the ratio stored by the data source (official IDX figure),
+    # else recompute from the period's components. The component-derived value is
+    # exposed as ``*_components`` so both bases stay visible — same rule as
+    # ROE/ROA/D-E below.
+    gross_margin_computed = gross_margin(metrics.gross_profit, metrics.revenue)
+    operating_margin_computed = operating_margin(metrics.operating_income, metrics.revenue)
+    net_margin_computed = net_margin(metrics.net_income, metrics.revenue)
+    results["gross_margin"] = _prefer_stored(
+        metrics.gross_margin, "gross_margin", gross_margin_computed
+    )
+    results["operating_margin"] = _prefer_stored(
+        metrics.operating_margin, "operating_margin", operating_margin_computed
+    )
+    results["net_margin"] = _prefer_stored(
+        metrics.net_margin, "net_margin", net_margin_computed
+    )
+    results["gross_margin_components"] = _components_result(
+        gross_margin_computed, "gross_margin_components"
+    )
+    results["operating_margin_components"] = _components_result(
+        operating_margin_computed, "operating_margin_components"
+    )
+    results["net_margin_components"] = _components_result(
+        net_margin_computed, "net_margin_components"
+    )
+    # ROE/ROA: prefer the ratio stored by the data source (official IDX figure),
+    # else recompute from the period's components — same rule as D/E and the
+    # current ratio so a stored ratio is never silently overridden. The
+    # component-derived value is ALSO exposed as ``roe_components`` /
+    # ``roa_components`` so the two bases can be compared (they legitimately
+    # differ when the source uses average equity or a different period).
+    roe_computed = roe(metrics.net_income, metrics.total_equity)
+    roa_computed = roa(metrics.net_income, metrics.total_assets)
+    results["roe"] = _prefer_stored(metrics.roe, "roe", roe_computed)
+    results["roa"] = _prefer_stored(metrics.roa, "roa", roa_computed)
+    results["roe_components"] = _components_result(roe_computed, "roe_components")
+    results["roa_components"] = _components_result(roa_computed, "roa_components")
+    # ROIC follows the same rule: prefer the ratio stored by the data source (the
+    # DB row often carries it while the recomputation needs ``total_debt``, which
+    # is frequently missing), with the component-derived value kept alongside.
+    roic_computed = roic(
         metrics.net_income,
         metrics.total_equity,
-        metrics.total_debt
+        metrics.total_debt,
     )
+    results["roic"] = _prefer_stored(metrics.roic, "roic", roic_computed)
+    results["roic_components"] = _components_result(roic_computed, "roic_components")
 
     # Financial health metrics
-    results["debt_to_equity"] = debt_to_equity(metrics.total_debt, metrics.total_equity)
+    # Prefer a precomputed debt-to-equity from the data source (the DB stores the
+    # ratio directly); only recompute from raw components when it is absent. The
+    # raw path needs ``total_debt``, which is often missing while the stored
+    # ratio is present, so recomputing blindly would drop a known value.
+    results["debt_to_equity"] = _prefer_stored(
+        metrics.debt_to_equity,
+        "debt_to_equity",
+        debt_to_equity(metrics.total_debt, metrics.total_equity),
+    )
     results["net_debt_to_ebitda"] = net_debt_to_ebitda(
         metrics.total_debt,
         metrics.cash_and_equivalents,
@@ -701,17 +796,11 @@ def calculate_all_metrics(metrics: FinancialMetrics, period_label: str = "") -> 
     )
     # Prefer a precomputed current ratio from the data source (e.g. the DB row
     # stores ``current_ratio`` directly without the assets/liabilities split).
-    if metrics.current_ratio is not None:
-        results["current_ratio"] = MetricResult(
-            value=float(metrics.current_ratio),
-            metric_name="current_ratio",
-            formula="(from data source)",
-        )
-    else:
-        results["current_ratio"] = current_ratio(
-            metrics.current_assets,
-            metrics.current_liabilities
-        )
+    results["current_ratio"] = _prefer_stored(
+        metrics.current_ratio,
+        "current_ratio",
+        current_ratio(metrics.current_assets, metrics.current_liabilities),
+    )
     results["interest_coverage"] = interest_coverage(
         metrics.operating_income,  # Using OI as proxy for EBIT
         metrics.interest_expense

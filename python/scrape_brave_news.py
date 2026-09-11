@@ -40,6 +40,7 @@ from curl_cffi import requests
 from dotenv import load_dotenv
 
 from database.scraper_store import ScraperDatabase
+from news_relevance import article_text, is_relevant_news
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -215,15 +216,28 @@ def normalize_item(item: dict, ticker: str | None) -> dict | None:
     }
 
 
-def _filter_and_insert(store: ScraperDatabase, cfg: dict, items: list[dict], ticker: str | None) -> int:
-    """Filter a raw Brave result list by source, normalize, and insert. Returns inserted count.
+def _filter_and_insert(
+    store: ScraperDatabase,
+    cfg: dict,
+    items: list[dict],
+    ticker: str | None,
+    company_name: str | None = None,
+) -> int:
+    """Filter a raw Brave result list by source + relevance, normalize, insert.
 
-    Shared by the per-ticker (``scrape_brave_news``) and general/macro (``scrape_brave_macro``)
-    modes so filtering, source-diagnostics, and persistence stay identical.
+    Shared by the per-ticker (``scrape_brave_news``) and general/macro
+    (``scrape_brave_macro``) modes so filtering, source-diagnostics, and
+    persistence stay identical.
+
+    When ``ticker`` is set the article must actually mention the company
+    (ticker, full name tokens, or name acronym — see ``news_relevance``); Brave
+    matches loosely and would otherwise tag unrelated articles with the query
+    ticker. Macro items (``ticker is None``) are not gated.
     """
     kept = []
     dropped = 0
     dropped_sources: list[str] = []
+    irrelevant = 0
     for item in items:
         if not source_allowed(item, cfg["sources"]):
             dropped += 1
@@ -234,14 +248,27 @@ def _filter_and_insert(store: ScraperDatabase, cfg: dict, items: list[dict], tic
                 dropped_sources.append(src)
             continue
         rec = normalize_item(item, ticker)
-        if rec:
-            kept.append(rec)
+        if not rec:
+            continue
+        if ticker and not is_relevant_news(
+            article_text(rec["title"], rec["content"]), ticker, company_name
+        ):
+            irrelevant += 1
+            continue
+        kept.append(rec)
     if kept:
         n = store.insert_news(kept)
         print(f"  -> fetched {len(items)}, kept {len(kept)}, inserted {n}" + (f", dropped {dropped}" if dropped else ""))
     else:
         n = 0
-        print(f"  -> fetched {len(items)}, none kept (source filter)" + (f", dropped {dropped}" if dropped else ""))
+        print(
+            f"  -> fetched {len(items)}, none kept"
+            + (f", dropped {dropped}" if dropped else "")
+            + (f", irrelevant {irrelevant}" if irrelevant else "")
+        )
+    if irrelevant:
+        label = f" for {ticker}" if ticker else ""
+        print(f"     relevance gate skipped {irrelevant} unrelated item(s){label}")
     if cfg["sources"] and dropped_sources:
         print(f"     dropped sources: {', '.join(dropped_sources[:8])}")
         print("     -> add any of these to BRAVE_SOURCES to keep them")
@@ -284,10 +311,15 @@ def scrape_brave_news(
     )
     persisted = 0
     with ScraperDatabase() as store:
+        # Company names let the relevance gate match prose mentions, not just the
+        # ticker (Brave tags every result with the query ticker otherwise).
+        names = store.get_company_names(tickers)
         for index, ticker in enumerate(tickers, start=1):
             print(f"[{index}/{len(tickers)}] {ticker}")
             items = fetch_brave_news(cfg, build_query(ticker, cfg["country"], cfg["lang"]))
-            persisted += _filter_and_insert(store, cfg, items, ticker)
+            persisted += _filter_and_insert(
+                store, cfg, items, ticker, names.get(str(ticker).upper())
+            )
             if delay:
                 time.sleep(delay)
     print(f"Done. Inserted {persisted} news records.")

@@ -6,6 +6,8 @@ Provides REST API endpoints for all analysis tools.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -272,8 +274,8 @@ async def ai_fundamental_analysis(request: FundamentalAnalysisRequest):
 
         llm_client = None
         if request.use_llm:
-            from ai.llm import LLMClient
-            llm_client = LLMClient()
+            from ai.llm import TIER_FAST, llm_client_for
+            llm_client = llm_client_for(TIER_FAST)
         result = analyze_fundamentals(
             ticker=request.ticker,
             use_llm=request.use_llm,
@@ -292,8 +294,8 @@ async def ai_dividend_analysis(request: DividendAnalysisRequest):
 
         llm_client = None
         if request.use_llm:
-            from ai.llm import LLMClient
-            llm_client = LLMClient()
+            from ai.llm import TIER_FAST, llm_client_for
+            llm_client = llm_client_for(TIER_FAST)
         result = analyze_dividend(
             ticker=request.ticker,
             use_llm=request.use_llm,
@@ -312,8 +314,8 @@ async def ai_validate(request: ValidatorRequest):
 
         llm_client = None
         if request.use_llm:
-            from ai.llm import LLMClient
-            llm_client = LLMClient()
+            from ai.llm import TIER_FAST, llm_client_for
+            llm_client = llm_client_for(TIER_FAST)
         result = analyze_validator(
             ticker=request.ticker,
             analysis=request.analysis,
@@ -333,8 +335,8 @@ async def ai_validate_report(ticker: str, use_llm: bool = False):
 
         llm_client = None
         if use_llm:
-            from ai.llm import LLMClient
-            llm_client = LLMClient()
+            from ai.llm import TIER_FAST, llm_client_for
+            llm_client = llm_client_for(TIER_FAST)
         result = analyze_validator(ticker=ticker, use_llm=use_llm, llm_client=llm_client)
         return _json_safe({"status": "ok", **result})
     except Exception as e:
@@ -550,91 +552,96 @@ async def ai_screen_analysis(request: ScreenAnalysisRequest):
     """
     try:
         from ai.data_loader_pg import get_data_loader
-        from ai.llm import LLMClient
+        from ai.llm import TIER_FAST, llm_client_for
 
-        loader = get_data_loader()
-        stocks = loader.list_stock_metrics()
-        result = run_screening(
-            stocks=stocks,
-            screen_type=request.screen_type,
-            filters=request.filters,
-        )
-
-        # Reduce to the requested tickers (if any), then top-N passed results.
-        results = result.get("results", [])
-        if request.tickers:
-            wanted = {t.strip().upper() for t in request.tickers}
-            results = [r for r in results if r.get("ticker") in wanted]
-        passed = [r for r in results if r.get("passed")]
-        top = passed[: max(1, request.top_n)]
-
-        llm_client = LLMClient()
-        llm_analysis = ""
-        if top and llm_client.is_available:
-            lines = [
-                "# Screener Top Picks to Interpret",
-                f"Screen type: {request.screen_type or 'custom'}",
-                f"Date: {datetime.now().strftime('%Y-%m-%d')}",
-                "",
-                "Ticker | Pass rate | Score | ROE | Net Marg | Debt/Eq | P/E | Div Yield",
-                "--------|-----------|-------|-----|----------|---------|-----|-----------",
-            ]
-            for r in top:
-                tr = r.get("ticker", "")
-                fr = r.get("filter_results", {}) or {}
-                metric = {}
-                for v in fr.values():
-                    if isinstance(v, dict) and "value" in v:
-                        metric.setdefault(str(v.get("filter") or ""), v.get("value"))
-                lines.append(
-                    f"{tr} | {r.get('pass_rate', 0):.1f} | {r.get('score', 0):.1f} | "
-                    f"{metric.get('roe', '-')} | {metric.get('net_margin', '-')} | "
-                    f"{metric.get('debt_to_equity', '-')} | {metric.get('pe_ratio', '-')} | "
-                    f"{metric.get('dividend_yield', '-')}"
-                )
-            prompt = "\n".join(lines)
-            if request.question:
-                prompt += f"\n\nFocus question: {request.question}"
-            llm_result = llm_client.analyze_with_prompt(
-                prompt=prompt,
-                system_message=(
-                    "You are a professional investment research analyst for Indonesian stocks "
-                    "(IDX/BEI). Interpret the deterministic screening results with evidence, "
-                    "clearly separating FACT, INTERPRETATION, ASSUMPTION and SPECULATION. "
-                    "Do not invent financial numbers and do not give buy/sell advice."
-                ),
-                output_format="Markdown: short summary, key observations, risks, and watchlist.",
+        # Run the deterministic screen + optional LLM interpretation + DB persist
+        # in a worker thread so the event loop stays responsive.
+        def _run():
+            loader = get_data_loader()
+            stocks = loader.list_stock_metrics()
+            result = run_screening(
+                stocks=stocks,
+                screen_type=request.screen_type,
+                filters=request.filters,
             )
-            llm_analysis = llm_result.get("content") or llm_result.get("error") or ""
 
-        # Persist the AI screen analysis so it can be reviewed later (research
-        # memory for the screener). Store the deterministic results + LLM text.
-        analysis_id = None
-        try:
-            from database.scraper_store import ScraperDatabase
+            # Reduce to the requested tickers (if any), then top-N passed results.
+            results = result.get("results", [])
+            if request.tickers:
+                wanted = {t.strip().upper() for t in request.tickers}
+                results = [r for r in results if r.get("ticker") in wanted]
+            passed = [r for r in results if r.get("passed")]
+            top = passed[: max(1, request.top_n)]
 
-            ticker_list = [r.get("ticker") for r in top if r.get("ticker")]
-            with ScraperDatabase() as store:
-                analysis_id = store.save_screen_analysis(
-                    screen_type=request.screen_type,
-                    filters=request.filters or [],
-                    question=request.question or "",
-                    tickers=ticker_list,
-                    results=top,
-                    llm_analysis=llm_analysis,
+            llm_client = llm_client_for(TIER_FAST)
+            llm_analysis = ""
+            if top and llm_client.is_available:
+                lines = [
+                    "# Screener Top Picks to Interpret",
+                    f"Screen type: {request.screen_type or 'custom'}",
+                    f"Date: {datetime.now().strftime('%Y-%m-%d')}",
+                    "",
+                    "Ticker | Pass rate | Score | ROE | Net Marg | Debt/Eq | P/E | Div Yield",
+                    "--------|-----------|-------|-----|----------|---------|-----|-----------",
+                ]
+                for r in top:
+                    tr = r.get("ticker", "")
+                    fr = r.get("filter_results", {}) or {}
+                    metric = {}
+                    for v in fr.values():
+                        if isinstance(v, dict) and "value" in v:
+                            metric.setdefault(str(v.get("filter") or ""), v.get("value"))
+                    lines.append(
+                        f"{tr} | {r.get('pass_rate', 0):.1f} | {r.get('score', 0):.1f} | "
+                        f"{metric.get('roe', '-')} | {metric.get('net_margin', '-')} | "
+                        f"{metric.get('debt_to_equity', '-')} | {metric.get('pe_ratio', '-')} | "
+                        f"{metric.get('dividend_yield', '-')}"
+                    )
+                prompt = "\n".join(lines)
+                if request.question:
+                    prompt += f"\n\nFocus question: {request.question}"
+                llm_result = llm_client.analyze_with_prompt(
+                    prompt=prompt,
+                    system_message=(
+                        "You are a professional investment research analyst for Indonesian stocks "
+                        "(IDX/BEI). Interpret the deterministic screening results with evidence, "
+                        "clearly separating FACT, INTERPRETATION, ASSUMPTION and SPECULATION. "
+                        "Do not invent financial numbers and do not give buy/sell advice."
+                    ),
+                    output_format="Markdown: short summary, key observations, risks, and watchlist.",
                 )
-        except Exception as e:
-            print(f"[screen-analysis] Failed to persist analysis: {e}")
+                llm_analysis = llm_result.get("content") or llm_result.get("error") or ""
 
-        return _json_safe({
-            "status": "ok",
-            "screen_type": request.screen_type,
-            "count": len(results),
-            "passed": len(passed),
-            "results": top,
-            "llm_analysis": llm_analysis,
-            "analysis_id": analysis_id,
-        })
+            # Persist the AI screen analysis so it can be reviewed later (research
+            # memory for the screener). Store the deterministic results + LLM text.
+            analysis_id = None
+            try:
+                from database.scraper_store import ScraperDatabase
+
+                ticker_list = [r.get("ticker") for r in top if r.get("ticker")]
+                with ScraperDatabase() as store:
+                    analysis_id = store.save_screen_analysis(
+                        screen_type=request.screen_type,
+                        filters=request.filters or [],
+                        question=request.question or "",
+                        tickers=ticker_list,
+                        results=top,
+                        llm_analysis=llm_analysis,
+                    )
+            except Exception as e:
+                print(f"[screen-analysis] Failed to persist analysis: {e}")
+
+            return {
+                "status": "ok",
+                "screen_type": request.screen_type,
+                "count": len(results),
+                "passed": len(passed),
+                "results": top,
+                "llm_analysis": llm_analysis,
+                "analysis_id": analysis_id,
+            }
+
+        return _json_safe(await asyncio.to_thread(_run))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -665,10 +672,10 @@ async def ai_macro_impact(request: MacroImpactRequest):
     interprets and ranks that evidence; it never invents the sector/direction map.
     """
     try:
-        from ai.llm import LLMClient
+        from ai.llm import TIER_FAST, llm_client_for
         from ai.prompts.macro_impact import analyze_macro_impacts
 
-        llm_client = LLMClient() if request.use_llm else None
+        llm_client = llm_client_for(TIER_FAST) if request.use_llm else None
         result = analyze_macro_impacts(
             hours=request.hours,
             top_sectors=request.top_sectors,
@@ -800,30 +807,15 @@ async def run_backtest_endpoint(request: BacktestRequest):
 # =============================================================================
 
 def _research_report_to_dict(report) -> dict:
-    """Convert a ResearchReport object to the serializable dict used by the API."""
-    return {
-        "ticker": report.ticker,
-        "question": report.question,
-        "generated_at": report.timestamp.isoformat(),
-        "confidence_score": report.confidence,
-        "overall_verdict": getattr(report, "overall_verdict", ""),
-        "claim_summary": {"FACT": 0, "INTERPRETATION": 0, "ASSUMPTION": 0, "SPECULATION": 0},
-        "sections": {
-            "executive_summary": report.executive_summary,
-            "business_quality": report.business_quality,
-            "growth_analysis": report.growth_analysis,
-            "profitability": report.profitability,
-            "financial_health": report.financial_health,
-            "valuation": report.valuation,
-            "technical_position": report.technical_position,
-            "recent_events": report.recent_events,
-            "risks": report.risks,
-            "bull_case": report.bull_case,
-            "base_case": report.base_case,
-            "bear_case": report.bear_case,
-            "conclusion": report.conclusion,
-        },
-    }
+    """Convert a ResearchReport object to the serializable dict used by the API.
+
+    Delegates to ``ai.report.report_to_dict`` so the interactive endpoints, the
+    auto-analyze pipeline and the research memory all share one structure and a
+    real (marker-derived) ``claim_summary``.
+    """
+    from ai.report import report_to_dict
+
+    return report_to_dict(report)
 
 
 def _attach_validator(result: dict) -> dict:
@@ -859,11 +851,92 @@ def _stamp_candidate_validity(ticker: str, result: dict) -> None:
         print(f"Candidate validity stamp skipped for {ticker}: {e}")
 
 
+def _has_recent_ticker_news(ticker: str, max_age_hours: float) -> bool:
+    """Return True when the newest stored news for ``ticker`` is recent enough.
+
+    Used to avoid hitting the Brave API when fresh per-ticker news already exists
+    in the database. Rows without a timestamp are ignored (PostgreSQL sorts NULLs
+    first on DESC, so a single-row peek could otherwise look stale). Fails open
+    (returns False) so any error results in a fetch.
+    """
+    try:
+        from ai.tools import get_company_news
+
+        news = get_company_news(ticker, limit=5).get("news") or []
+        newest = None
+        for item in news:
+            raw = item.get("published_at")
+            if not raw:
+                continue
+            try:
+                when = datetime.fromisoformat(str(raw))
+            except (TypeError, ValueError):
+                continue
+            if newest is None or when > newest:
+                newest = when
+        if newest is None:
+            return False
+        now = datetime.now(newest.tzinfo) if newest.tzinfo else datetime.now()
+        age_hours = (now - newest).total_seconds() / 3600.0
+        return age_hours <= max_age_hours
+    except Exception as exc:
+        print(f"  [on-demand news] Recency check failed for {ticker}: {exc}")
+        return False
+
+
+def _fetch_fresh_ticker_news(ticker: str, delay: float = 0.0) -> None:
+    """On-demand: fetch news for a ticker and persist it to PostgreSQL.
+
+    Called when a comprehensive analysis is requested so the LLM reasons over
+    fresh per-ticker news (the daily pipeline only scrapes macro news now). The
+    fetch only happens when there is no recent news yet: if the newest stored
+    article is younger than ``NEWS_FRESHNESS_HOURS`` (default 24), the API call
+    is skipped and the existing news is reused.
+
+    Best-effort: a missing Brave key / network failure must never block the
+    analysis — stale DB news is still used if this returns nothing.
+    """
+    if not os.environ.get("BRAVE_API_KEY"):
+        print(f"  [on-demand news] BRAVE_API_KEY not set; skipping scrape for {ticker}.")
+        return
+
+    try:
+        max_age_hours = float(os.environ.get("NEWS_FRESHNESS_HOURS", "24"))
+    except ValueError:
+        max_age_hours = 24.0
+
+    if _has_recent_ticker_news(ticker, max_age_hours):
+        print(
+            f"  [on-demand news] Recent news (<{max_age_hours:g}h) exists for "
+            f"{ticker}; skipping scrape."
+        )
+        return
+
+    try:
+        from scrape_brave_news import scrape_brave_news
+        src = scrape_brave_news(tickers=[ticker], delay=delay)
+        print(f"  [on-demand news] Scraped {src} news record(s) for {ticker}.")
+        # Drop the read cache so the analysis picks up the freshly stored rows.
+        try:
+            from ai.data_loader_pg import clear_cache
+            clear_cache()
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"  [on-demand news] Fresh news fetch failed for {ticker}: {exc}")
+
+
 @app.post("/ai/analyze", response_model=ResearchReportResponse)
 async def ai_analyze_stock(request: StockAnalysisRequest):
     """Analyze a stock using AI researcher."""
     try:
-        report = analyze_stock(request.ticker, question=request.question)
+        # Offload the blocking LLM/research call to a worker thread so it does
+        # not freeze the event loop (and the whole web) while it runs.
+        def _run():
+            _fetch_fresh_ticker_news(request.ticker)
+            report = analyze_stock(request.ticker, question=request.question)
+            return report
+        report = await asyncio.to_thread(_run)
         result = _attach_validator(_research_report_to_dict(report))
         # Persist to research memory so thesis history can be tracked over time.
         try:
@@ -913,10 +986,19 @@ async def generate_research(ticker: str, min_hours: int = 24, question: str = ""
                 except (ValueError, TypeError):
                     pass
 
-        report = _analyze(ticker, question=question or "")
-        result = _attach_validator(_research_report_to_dict(report))
-        save_research_report(ticker, result, question=question or "")
-        _stamp_candidate_validity(ticker, result)
+        # Offload the blocking LLM analysis and DB persistence to a worker thread
+        # so the event loop stays responsive (other web requests keep working).
+        def _run_full_analysis():
+            # On-demand: fetch fresh news for this ticker first so the analysis is
+            # grounded in the latest per-ticker news (daily pipeline is macro-only).
+            _fetch_fresh_ticker_news(ticker)
+            report = _analyze(ticker, question=question or "")
+            result = _attach_validator(_research_report_to_dict(report))
+            save_research_report(ticker, result, question=question or "")
+            _stamp_candidate_validity(ticker, result)
+            return result
+
+        result = await asyncio.to_thread(_run_full_analysis)
         return _json_safe({"status": "generated", "report": result})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -933,10 +1015,15 @@ async def ai_analyze_stock_stream(request: StockAnalysisRequest):
       event: done    data: {}
       event: error   data: {"message"}
     """
-    import asyncio
     import json
 
     from fastapi.responses import StreamingResponse
+
+    # Reuse the non-streaming error-detection helpers so a provider failure
+    # surfaced inside a stream (HTTP-200 with no choices, or an error sentinel
+    # in the delta content like "[Error] upstream error") is emitted as an
+    # ``error`` event instead of being streamed as a real answer.
+    from ai.llm import CONTENT_ERROR_MAX_LENGTH, content_error, provider_error
 
     def sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -949,6 +1036,11 @@ async def ai_analyze_stock_stream(request: StockAnalysisRequest):
             if not researcher.client:
                 yield sse("error", {"message": "LLM belum dikonfigurasi. Set OPENAI_API_KEY environment variable."})
                 return
+
+            # On-demand: fetch fresh per-ticker news (off the event loop) so the
+            # AI chat is grounded in the latest news for this stock.
+            yield sse("status", {"phase": "collecting", "message": f"Mencari berita terbaru {request.ticker.upper()} dan data pasar..."})
+            await asyncio.to_thread(_fetch_fresh_ticker_news, request.ticker)
 
             # Pull deterministic context so the AI works from real data.
             yield sse("status", {"phase": "collecting", "message": "Mengambil data fundamental, teknis & valuasi..."})
@@ -967,11 +1059,80 @@ async def ai_analyze_stock_stream(request: StockAnalysisRequest):
                 stream=True,
             )
 
-            for chunk in response:
-                choices = getattr(chunk, "choices", None) or []
-                if choices and getattr(choices[0], "delta", None) and getattr(choices[0].delta, "content", None):
-                    yield sse("chunk", {"text": choices[0].delta.content})
-            yield sse("done", {})
+            # The sync OpenAI Stream performs blocking socket reads. Consume it in a
+            # worker thread and pump chunks through an asyncio.Queue so the event
+            # loop (and therefore the rest of the web) stays responsive while AI
+            # text streams in.
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue = asyncio.Queue()
+
+            def consume_stream():
+                try:
+                    for chunk in response:
+                        loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
+                except Exception as e:
+                    loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+
+            consume_future = loop.run_in_executor(None, consume_stream)
+
+            # Provider error sentinels arrive as normal deltas at the head of the
+            # stream (e.g. "[Error] upstream error"). Buffer the first tokens and
+            # only stream them once we're confident they are a real answer; if
+            # they match an error shape, surface an ``error`` event instead.
+            head = ""
+            streamed_any = False
+            while True:
+                kind, payload = await queue.get()
+                if kind == "done":
+                    break
+                if kind == "error":
+                    yield sse("error", {"message": payload})
+                    await consume_future
+                    return
+
+                # Some routers return HTTP-200 with an error object and no choices.
+                err = provider_error(payload)
+                if err:
+                    await consume_future
+                    yield sse("error", {"message": err})
+                    return
+
+                choices = getattr(payload, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                piece = (getattr(delta, "content", None) or "") if delta else ""
+                if not piece:
+                    continue
+
+                if not streamed_any:
+                    head += piece
+                    err = content_error(head)
+                    if err:
+                        await consume_future
+                        yield sse("error", {"message": err})
+                        return
+                    if len(head) > CONTENT_ERROR_MAX_LENGTH:
+                        # Long enough that this is a real answer — flush the head
+                        # and stream the remainder live.
+                        yield sse("chunk", {"text": head})
+                        head = ""
+                        streamed_any = True
+                else:
+                    yield sse("chunk", {"text": piece})
+
+            # Flush any short-but-real head that the loop ended on.
+            if head:
+                yield sse("chunk", {"text": head})
+                streamed_any = True
+
+            await consume_future
+            if not streamed_any:
+                yield sse("error", {"message": "LLM provider error: response returned no content"})
+            else:
+                yield sse("done", {})
         except Exception as e:
             yield sse("error", {"message": str(e)})
 
@@ -982,32 +1143,13 @@ async def ai_analyze_stock_stream(request: StockAnalysisRequest):
 async def ai_compare_stocks(request: StockComparisonRequest):
     """Compare multiple stocks using AI."""
     try:
-        report = compare_stocks(request.tickers, question=request.question)
-        # Convert ResearchReport to match ResearchReportResponse schema
-        result = {
-            "ticker": report.ticker,
-            "question": report.question,
-            "generated_at": report.timestamp.isoformat(),
-            "confidence_score": report.confidence,
-            "overall_verdict": getattr(report, 'overall_verdict', ''),
-            "claim_summary": {"FACT": 0, "INTERPRETATION": 0, "ASSUMPTION": 0, "SPECULATION": 0},
-            "sections": {
-                "executive_summary": report.executive_summary,
-                "business_quality": report.business_quality,
-                "growth_analysis": report.growth_analysis,
-                "profitability": report.profitability,
-                "financial_health": report.financial_health,
-                "valuation": report.valuation,
-                "technical_position": report.technical_position,
-                "recent_events": report.recent_events,
-                "risks": report.risks,
-                "bull_case": report.bull_case,
-                "base_case": report.base_case,
-                "bear_case": report.bear_case,
-                "conclusion": report.conclusion,
-            }
-        }
-        return ResearchReportResponse(**result)
+        # Offload blocking LLM call to a worker thread.
+        report = await asyncio.to_thread(
+            compare_stocks, request.tickers, question=request.question
+        )
+        from ai.report import report_to_dict
+
+        return ResearchReportResponse(**report_to_dict(report))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1017,32 +1159,13 @@ async def ai_validate_thesis(request: ThesisValidationRequest):
     """Validate an investment thesis."""
     try:
         researcher = AIResearcher()
-        report = researcher.validate_thesis(request.ticker, request.thesis)
-        # Convert ResearchReport to match ResearchReportResponse schema
-        result = {
-            "ticker": report.ticker,
-            "question": report.question,
-            "generated_at": report.timestamp.isoformat(),
-            "confidence_score": report.confidence,
-            "overall_verdict": getattr(report, 'overall_verdict', ''),
-            "claim_summary": {"FACT": 0, "INTERPRETATION": 0, "ASSUMPTION": 0, "SPECULATION": 0},
-            "sections": {
-                "executive_summary": report.executive_summary,
-                "business_quality": report.business_quality,
-                "growth_analysis": report.growth_analysis,
-                "profitability": report.profitability,
-                "financial_health": report.financial_health,
-                "valuation": report.valuation,
-                "technical_position": report.technical_position,
-                "recent_events": report.recent_events,
-                "risks": report.risks,
-                "bull_case": report.bull_case,
-                "base_case": report.base_case,
-                "bear_case": report.bear_case,
-                "conclusion": report.conclusion,
-            }
-        }
-        return ResearchReportResponse(**result)
+        # Offload blocking LLM call to a worker thread.
+        report = await asyncio.to_thread(
+            researcher.validate_thesis, request.ticker, request.thesis
+        )
+        from ai.report import report_to_dict
+
+        return ResearchReportResponse(**report_to_dict(report))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

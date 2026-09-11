@@ -38,13 +38,6 @@ from database.scraper_store import ScraperDatabase
 _AUTO_ANALYZE_MIN_HOURS_DEFAULT = 24.0
 _RESEARCH_ANALYZE_MIN_HOURS_DEFAULT = 24.0 * 7  # 1 week
 
-# Fields the research endpoint exposes (see api/main.py _research_report_to_dict).
-_REPORT_FIELDS = [
-    "executive_summary", "business_quality", "growth_analysis", "profitability",
-    "financial_health", "valuation", "technical_position", "recent_events",
-    "risks", "bull_case", "base_case", "bear_case", "conclusion",
-]
-
 
 def _hours_since(iso: str | None) -> float | None:
     """Return hours between a saved/timestamp string and now, or None."""
@@ -63,20 +56,14 @@ def _hours_since(iso: str | None) -> float | None:
 def report_to_dict(report) -> dict:
     """Convert a ``ResearchReport`` object to the dict persisted in memory.
 
-    Produces the same ``sections``-based structure as the API's
-    ``_research_report_to_dict`` so the research tab renders content the same
-    way regardless of whether the report came from the endpoint or the pipeline.
+    Delegates to ``ai.report.report_to_dict`` so the pipeline stores exactly the
+    same ``sections``/``claim_summary`` structure as the API endpoints (the
+    ``claim_summary`` is derived from the report's inline claim markers rather
+    than hardcoded to zeros).
     """
-    result = {
-        "ticker": report.ticker,
-        "question": getattr(report, "question", ""),
-        "generated_at": (getattr(report, "timestamp", None) or datetime.now()).isoformat(),
-        "confidence_score": getattr(report, "confidence", None),
-        "overall_verdict": getattr(report, "overall_verdict", ""),
-        "claim_summary": {"FACT": 0, "INTERPRETATION": 0, "ASSUMPTION": 0, "SPECULATION": 0},
-        "sections": {field: getattr(report, field, "") for field in _REPORT_FIELDS},
-    }
-    return result
+    from ai.report import report_to_dict as _report_to_dict
+
+    return _report_to_dict(report)
 
 
 def analyze_ticker(
@@ -195,16 +182,22 @@ def run(
         return 0
 
     print(f"Auto-analyzing {len(tickers)} ticker(s) | min_hours={effective_min} | force={force}")
-    done = {"analyzed": 0, "skipped": 0}
+    done = {"analyzed": 0, "skipped": 0, "failed": 0}
     for t in tickers:
         if dry_run:
             print(f"  [dry-run] {t}")
             continue
-        r = analyze_ticker(t, min_hours=effective_min, force=force)
+        try:
+            r = analyze_ticker(t, min_hours=effective_min, force=force)
+        except Exception as e:
+            # A provider failure on one ticker must not abort the whole run.
+            print(f"  {t}: failed: {e}")
+            done["failed"] += 1
+            continue
         extra = f" (age {r['age_hours']}h)" if r.get("age_hours") is not None else ""
         print(f"  {t}: {r['status']}{extra}")
         done[r["status"]] = done.get(r["status"], 0) + 1
-    print(f"Done. analyzed={done['analyzed']} skipped={done['skipped']}")
+    print(f"Done. analyzed={done['analyzed']} skipped={done['skipped']} failed={done['failed']}")
     return done["analyzed"]
 
 

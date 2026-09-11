@@ -7,8 +7,83 @@ Handles formatting and structuring of investment research reports.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+# Inline claim markers the analyst is instructed to use, e.g. "[FACT] ROE 12%".
+CLAIM_TYPES = ("FACT", "INTERPRETATION", "ASSUMPTION", "SPECULATION")
+
+# Sections every serialized report carries, shared by the API endpoints, the
+# scheduled auto-analyze pipeline and the result validator.
+REPORT_SECTION_FIELDS = (
+    "executive_summary",
+    "business_quality",
+    "growth_analysis",
+    "profitability",
+    "financial_health",
+    "valuation",
+    "technical_position",
+    "recent_events",
+    "risks",
+    "bull_case",
+    "base_case",
+    "bear_case",
+    "conclusion",
+)
+
+_CLAIM_MARKER_RE = re.compile(
+    r"\[\s*(FACT|INTERPRETATION|ASSUMPTION|SPECULATION)\s*\]",
+    re.IGNORECASE,
+)
+
+
+def count_claim_markers(*texts: Any) -> Dict[str, int]:
+    """Count inline ``[FACT]``/``[INTERPRETATION]``/... markers in report text.
+
+    Deterministic: derived from what the report actually says, never from the
+    model grading itself. Previously ``claim_summary`` was hardcoded to zeros,
+    which made the validator's data-quality/transparency dimensions always
+    under-report and hid the fact/interpretation split from the user.
+    """
+    counts = {claim_type: 0 for claim_type in CLAIM_TYPES}
+    for text in texts:
+        if not text:
+            continue
+        for match in _CLAIM_MARKER_RE.finditer(str(text)):
+            counts[match.group(1).upper()] += 1
+    return counts
+
+
+def report_to_dict(report: Any) -> Dict[str, Any]:
+    """Serialize a research report to the dict shape used by API + memory.
+
+    Single source of truth: the interactive endpoints, ``/ai/compare``,
+    ``/ai/validate-thesis`` and the scheduled ``auto_analyze`` pipeline all use
+    this so the structure (and the real ``claim_summary``) cannot drift apart.
+    """
+    sections = {
+        field: getattr(report, field, "") or ""
+        for field in REPORT_SECTION_FIELDS
+    }
+    timestamp = getattr(report, "timestamp", None) or datetime.now()
+    # Preserve provenance: without it the validator's data-quality dimension
+    # always under-reports and saved reports lose where their evidence came from.
+    data_sources = getattr(report, "data_sources", None) or []
+    if isinstance(data_sources, str):
+        data_sources = [data_sources]
+    return {
+        "ticker": getattr(report, "ticker", ""),
+        "question": getattr(report, "question", ""),
+        "generated_at": (
+            timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+        ),
+        "confidence_score": getattr(report, "confidence", None),
+        "overall_verdict": getattr(report, "overall_verdict", ""),
+        "data_sources": [str(source) for source in data_sources],
+        "claim_summary": count_claim_markers(*sections.values()),
+        "sections": sections,
+    }
 
 
 class ResearchReport:

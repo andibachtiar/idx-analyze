@@ -70,12 +70,6 @@ STEPS: list[dict[str, object]] = [
         "desc": "Brave macro/economy/politics queries (ticker=NULL, source-filtered)",
     },
     {
-        "name": "news_brave_ticker",
-        "script": "scrape_brave_news.py",
-        "args": [],
-        "desc": "Brave per-ticker news (favorites/watchlist; stored with ticker)",
-    },
-    {
         "name": "news_impacts",
         "script": "enrich_news_impacts.py",
         "args": [],
@@ -199,7 +193,6 @@ STEP_CADENCE: dict[str, str] = {
     "yfinance": "weekly",
     "financial_history": "monthly",
     "news_brave": "daily",
-    "news_brave_ticker": "daily",
     "news_impacts": "daily",
     "research_candidates": "daily",
     "research_analyze": "daily",

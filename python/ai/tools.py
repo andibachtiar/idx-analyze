@@ -279,7 +279,16 @@ def get_fundamental_analysis(ticker: str, metrics: Optional[FinancialMetrics] = 
     # If no metrics provided, try to load from data loader
     if metrics is None:
         loader = get_data_loader()
-        ratios = loader.get_financial_ratios(ticker)
+        # Prefer a merged snapshot: different stored periods carry different
+        # columns (the IDX row has P/E/ROE while the backfill row has
+        # revenue/margins), so a single latest row can be sparse. Fall back to
+        # the plain latest row when the loader has no merge helper.
+        ratios = None
+        merge = getattr(loader, "get_financial_ratios_merged", None)
+        if callable(merge):
+            ratios = merge(ticker) or None
+        if not ratios:
+            ratios = loader.get_financial_ratios(ticker)
 
         if ratios:
             # Map the PostgreSQL row (DB column names) to FinancialMetrics.
@@ -335,6 +344,21 @@ def get_fundamental_analysis(ticker: str, metrics: Optional[FinancialMetrics] = 
         "roe": _format_metric_result(all_metrics.get("roe")),
         "roa": _format_metric_result(all_metrics.get("roa")),
         "roic": _format_metric_result(all_metrics.get("roic")),
+        # Component-derived companions of the stored margins/ROE/ROA/ROIC: exposed
+        # so the two bases can be compared instead of silently disagreeing (a
+        # stored ratio may use a different period, scope or equity base).
+        "gross_margin_components": _format_metric_result(
+            all_metrics.get("gross_margin_components")
+        ),
+        "operating_margin_components": _format_metric_result(
+            all_metrics.get("operating_margin_components")
+        ),
+        "net_margin_components": _format_metric_result(
+            all_metrics.get("net_margin_components")
+        ),
+        "roe_components": _format_metric_result(all_metrics.get("roe_components")),
+        "roa_components": _format_metric_result(all_metrics.get("roa_components")),
+        "roic_components": _format_metric_result(all_metrics.get("roic_components")),
     }
 
     # Financial health metrics
@@ -529,7 +553,16 @@ def get_valuation(
             price = price_data.get("price")
 
     if metrics is None:
-        ratios = loader.get_financial_ratios(ticker)
+        # Prefer a merged snapshot: different stored periods carry different
+        # columns (the IDX row has P/E/ROE while the backfill row has
+        # revenue/margins), so a single latest row can be sparse. Fall back to
+        # the plain latest row when the loader has no merge helper.
+        ratios = None
+        merge = getattr(loader, "get_financial_ratios_merged", None)
+        if callable(merge):
+            ratios = merge(ticker) or None
+        if not ratios:
+            ratios = loader.get_financial_ratios(ticker)
         if ratios:
             # Map the PostgreSQL row (DB column names) to FinancialMetrics.
             metrics = _metrics_from_db(ratios)
@@ -593,11 +626,21 @@ def get_historical_analysis(
     # Try to get data from loader
     loader = get_data_loader()
 
-    # Check if we have historical data
-    if raw_data is None or len(raw_data) < 2:
-        # Note: Historical data not currently scraped, only current ratios available
-        result["notes"] = "Historical financial data not available. Only current period ratios are available from scraped data."
-        return result
+    # Auto-load the stored multi-period history when the caller did not pass it,
+    # so the engine works from real scraped periods instead of returning empty.
+    if raw_data is None:
+        history = getattr(loader, "get_financial_ratio_history", None)
+        if callable(history):
+            raw_data = history(ticker) or []
+
+    # Check if we have historical data (need at least two periods for growth)
+    if not raw_data or len(raw_data) < 2:
+        result["notes"] = (
+            "Historical financial data not available (fewer than two periods "
+            "stored). Only current period ratios are available from scraped data."
+        )
+        result["periods"] = len(raw_data) if raw_data else 0
+        return _format_structured_result(result)
 
     # Analyze growth
     growth_results = analyze_company_growth(ticker, raw_data)
@@ -665,6 +708,28 @@ def get_company_news(
 
     return {
         "ticker": ticker.upper(),
+        "news": news,
+        "count": len(news),
+        "limit": limit,
+    }
+
+
+def get_macro_news(
+    limit: int = 10
+) -> Dict[str, Any]:
+    """
+    Get recent macro/economic news (articles with no ticker).
+
+    Args:
+        limit: Maximum number of news articles to return
+
+    Returns:
+        Dictionary with macro news articles
+    """
+    loader = get_data_loader()
+    news = loader.get_macro_news(limit)
+
+    return {
         "news": news,
         "count": len(news),
         "limit": limit,

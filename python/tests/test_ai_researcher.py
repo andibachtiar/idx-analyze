@@ -83,6 +83,10 @@ class TestResearcherInit:
         """Test creating researcher without API key (uses mock)."""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_MODEL", raising=False)  # Clear model env var
+        # Two-tier routing reads the tier vars first, so clear them too or the
+        # default could resolve to a tier-specific model left in the environment.
+        monkeypatch.delenv("OPENAI_MODEL_STRONG", raising=False)
+        monkeypatch.delenv("OPENAI_MODEL_FAST", raising=False)
         researcher = AIResearcher(api_key=None)
         assert researcher.model == "gpt-4o"
         assert researcher.client is None
@@ -100,18 +104,51 @@ class TestResearcherInit:
         assert researcher.model == "gpt-4-turbo"
 
     def test_create_researcher_with_base_url(self):
-        """Test creating researcher with custom base URL."""
+        """Custom base URL + timeout, and SDK retries disabled (retries are owned
+        by _call_llm; leaving SDK retries on multiplies into a ~45min hang)."""
         with patch('ai.researcher.OpenAI') as mock_openai:
             mock_openai.return_value = MagicMock()
             researcher = AIResearcher(
                 api_key="test",
-                base_url="https://custom.api.com"
+                base_url="https://custom.api.com",
+                timeout=300.0,
             )
             mock_openai.assert_called_once_with(
                 api_key="test",
                 base_url="https://custom.api.com",
-                timeout=30.0
+                timeout=300.0,
+                max_retries=0,
             )
+
+    def test_create_researcher_default_timeout(self, monkeypatch):
+        """Test that timeout defaults from OPENAI_TIMEOUT env var."""
+        monkeypatch.setenv("OPENAI_TIMEOUT", "120")
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test")
+            assert researcher.timeout == 120.0
+            mock_openai.assert_called_once_with(
+                api_key="test",
+                base_url=researcher.base_url,
+                timeout=120.0,
+                max_retries=0,
+            )
+
+    def test_create_researcher_total_timeout_default(self, monkeypatch):
+        """Wall-clock budget for one logical call defaults to 600s."""
+        monkeypatch.delenv("OPENAI_TOTAL_TIMEOUT", raising=False)
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test")
+            assert researcher.total_timeout == 600.0
+
+    def test_create_researcher_total_timeout_from_env(self, monkeypatch):
+        """OPENAI_TOTAL_TIMEOUT overrides the retry budget."""
+        monkeypatch.setenv("OPENAI_TOTAL_TIMEOUT", "90")
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test")
+            assert researcher.total_timeout == 90.0
 
 
 # =============================================================================
@@ -384,6 +421,146 @@ This is the conclusion.
 
         # Should fall back to putting everything in executive summary
         assert "plain text" in report.executive_summary.lower()
+
+    def test_call_llm_raises_on_provider_error_payload(self, monkeypatch):
+        """HTTP-200 error payload (choices=None + error) must raise, not mock."""
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test-key")
+        fake_response = MagicMock()
+        fake_response.choices = None
+        fake_response.model_extra = {
+            "error": {"type": "service_unavailable",
+                      "message": "The model service is temporarily unavailable."}
+        }
+        researcher._client.chat.completions.create.return_value = fake_response
+        monkeypatch.setattr("ai.researcher.time.sleep", lambda s: None)
+
+        with pytest.raises(RuntimeError) as exc:
+            researcher._call_llm([{"role": "user", "content": "x"}])
+
+        assert "service_unavailable" in str(exc.value)
+        # Transient error -> retried (initial attempt + max_retries).
+        assert researcher._client.chat.completions.create.call_count == 3
+
+    def test_call_llm_skips_retry_when_time_budget_exhausted(self, monkeypatch):
+        """A transient failure must NOT retry if another full request can't fit.
+
+        Regression guard: without this the loop stacked 3 x 300s (plus the SDK's
+        own retries), which is what made "analisis menyeluruh" hang for tens of
+        minutes and stall the web UI.
+        """
+        slept = []
+        monkeypatch.setattr("ai.researcher.time.sleep", slept.append)
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test-key", timeout=300.0, total_timeout=300.0)
+        fake_response = MagicMock()
+        fake_response.choices = None
+        fake_response.model_extra = {
+            "error": {"type": "service_unavailable", "message": "busy"}
+        }
+        researcher._client.chat.completions.create.return_value = fake_response
+
+        with pytest.raises(RuntimeError) as exc:
+            researcher._call_llm([{"role": "user", "content": "x"}])
+
+        assert "service_unavailable" in str(exc.value)
+        # Budget (300s) is smaller than one retry (2s backoff + 300s request).
+        assert researcher._client.chat.completions.create.call_count == 1
+        assert slept == []
+        # The raised error tells the user how to tune it.
+        assert "OPENAI_TOTAL_TIMEOUT" in str(exc.value)
+
+    def test_call_llm_rejects_error_shaped_content(self, monkeypatch):
+        """A 200 response whose CONTENT is a provider error must not be a report.
+
+        Observed live: the router answered every request with
+        ``content == "[Error] upstream error"``. Silently accepting that wrote a
+        junk report into research memory and blocked a retry for 24h.
+        """
+        monkeypatch.setattr("ai.researcher.time.sleep", lambda s: None)
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test-key")
+        fake = MagicMock()
+        fake.choices = [MagicMock()]
+        fake.choices[0].message.content = "[Error] upstream error"
+        researcher._client.chat.completions.create.return_value = fake
+
+        with pytest.raises(RuntimeError) as exc:
+            researcher._call_llm([{"role": "user", "content": "x"}])
+
+        assert "upstream error" in str(exc.value)
+        # Retried as transient, never returned as a report.
+        assert researcher._client.chat.completions.create.call_count == 3
+
+    def test_call_llm_rejects_empty_content(self, monkeypatch):
+        """Empty content must not become an empty saved report either."""
+        monkeypatch.setattr("ai.researcher.time.sleep", lambda s: None)
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test-key", total_timeout=60.0)
+        fake = MagicMock()
+        fake.choices = [MagicMock()]
+        fake.choices[0].message.content = ""
+        researcher._client.chat.completions.create.return_value = fake
+
+        with pytest.raises(RuntimeError) as exc:
+            researcher._call_llm([{"role": "user", "content": "x"}])
+
+        assert "empty_content" in str(exc.value)
+
+    def test_call_llm_returns_a_real_report(self, monkeypatch):
+        """A genuine (long, structured) response must not be flagged as an error."""
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test-key")
+        report = "## Executive Summary\n" + ("[FACT] ROE 7%. " * 40)
+        fake = MagicMock()
+        fake.choices = [MagicMock()]
+        fake.choices[0].message.content = report
+        researcher._client.chat.completions.create.return_value = fake
+
+        assert researcher._call_llm([{"role": "user", "content": "x"}]) == report
+
+    def test_call_llm_no_retry_on_non_transient_error(self, monkeypatch):
+        """A non-transient provider error must fail fast (single attempt)."""
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test-key")
+        fake_response = MagicMock()
+        fake_response.choices = None
+        fake_response.model_extra = {
+            "error": {"type": "invalid_request_error", "message": "bad model"}
+        }
+        researcher._client.chat.completions.create.return_value = fake_response
+        monkeypatch.setattr("ai.researcher.time.sleep", lambda s: None)
+
+        with pytest.raises(RuntimeError) as exc:
+            researcher._call_llm([{"role": "user", "content": "x"}])
+
+        assert "invalid_request_error" in str(exc.value)
+        assert researcher._client.chat.completions.create.call_count == 1
+
+    def test_call_llm_retries_then_succeeds(self, monkeypatch):
+        """Transient failure followed by a good response returns the content."""
+        with patch('ai.researcher.OpenAI') as mock_openai:
+            mock_openai.return_value = MagicMock()
+            researcher = AIResearcher(api_key="test-key")
+        bad = MagicMock()
+        bad.choices = None
+        bad.model_extra = {"error": {"type": "service_unavailable", "message": "busy"}}
+        good = MagicMock()
+        good.choices = [MagicMock()]
+        good.choices[0].message.content = "# Executive Summary\nAll good."
+        researcher._client.chat.completions.create.side_effect = [bad, good]
+        monkeypatch.setattr("ai.researcher.time.sleep", lambda s: None)
+
+        out = researcher._call_llm([{"role": "user", "content": "x"}])
+
+        assert "All good" in out
+        assert researcher._client.chat.completions.create.call_count == 2
 
 
 # =============================================================================

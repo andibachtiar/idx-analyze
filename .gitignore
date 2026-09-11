@@ -19,6 +19,7 @@ data/brokerSearch.json
 data/companyDetailsByKodeEmiten.json
 data/companySummaryByKodeEmiten.json
 data/financial_ratio.json
+data/reserach_memory/
 data/news/
 
 # --- Project Specific ---

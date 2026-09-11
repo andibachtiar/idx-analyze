@@ -22,8 +22,11 @@ def test_pipeline_starts_with_companies():
 
 def test_pipeline_has_expected_kinds_of_steps():
     names = _names(STEPS)
-    for expected in ["companies", "prices", "financial_ratio", "yfinance", "news_brave", "news_brave_ticker"]:
+    for expected in ["companies", "prices", "financial_ratio", "yfinance", "news_brave", "news_impacts"]:
         assert expected in names
+    # Per-ticker news is now fetched on-demand during comprehensive analysis,
+    # so the daily pipeline only scrapes macro news + impact tags.
+    assert "news_brave_ticker" not in names
 
 
 def test_select_steps_all_when_none():
@@ -33,10 +36,10 @@ def test_select_steps_all_when_none():
 
 
 def test_select_steps_subset_preserves_order():
+    # "news_brave_ticker" no longer exists; it should be reported as unknown.
     selected, unknown = select_steps("news_brave_ticker,prices")
-    assert unknown == []
-    # Order follows the canonical pipeline order, not the input order.
-    assert _names(selected) == ["prices", "news_brave_ticker"]
+    assert unknown == ["news_brave_ticker"]
+    assert _names(selected) == ["prices"]
 
 
 def test_select_steps_reports_unknown():
@@ -47,8 +50,9 @@ def test_select_steps_reports_unknown():
 
 def test_select_by_cadence_daily_includes_core_steps():
     names = _names(select_by_cadence("daily"))
-    for expected in ["companies", "prices", "financial_ratio", "news_brave", "news_brave_ticker", "news_impacts", "research_candidates"]:
+    for expected in ["companies", "prices", "financial_ratio", "news_brave", "news_impacts", "research_candidates"]:
         assert expected in names
+    assert "news_brave_ticker" not in names
     assert "yfinance" not in names
     assert "financial_history" not in names
 

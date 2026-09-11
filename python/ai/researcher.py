@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -45,18 +46,26 @@ try:
 except ImportError:
     OpenAI = None
 
+from ai.llm import (
+    TIER_STRONG,
+    TRANSIENT_ERROR_MARKERS,
+    content_error,
+    provider_error,
+    resolve_model,
+)
 from ai.prompts import (
     COMPARISON_PROMPT,
     INITIAL_ANALYSIS_PROMPT,
     SYSTEM_PROMPT,
     THESIS_VALIDATION_PROMPT,
 )
-from ai.report import ClaimTracker, ResearchReport
+from ai.report import REPORT_SECTION_FIELDS, ClaimTracker, ResearchReport
 from ai.tools import (
     get_company_info,
     get_company_news,
     get_fundamental_analysis,
     get_historical_analysis,
+    get_macro_news,
     get_stock_price,
     get_technical_analysis,
     get_valuation,
@@ -87,6 +96,93 @@ def _derive_verdict(text: str) -> str:
     return ""
 
 
+def _merge_news(
+    ticker_news: Optional[Dict[str, Any]],
+    macro_news: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Merge per-ticker news and macro news into a single news dict.
+
+    The result keeps the per-ticker news items first (more relevant to the stock)
+    then macro/economic items, so deterministic sections (events/risks) and the
+    LLM prompt see all available evidence without duplication.
+    """
+    ticker_items = (ticker_news or {}).get("news") or []
+    macro_items = (macro_news or {}).get("news") or []
+    merged = list(ticker_items) + list(macro_items)
+    return {
+        "news": merged,
+        "count": len(merged),
+        "has_company_news": bool(ticker_items),
+        "has_macro_news": bool(macro_items),
+    }
+
+
+# Heading text -> report section key. Phrases are matched on word boundaries and
+# in order, so more specific headings win ("Bear Case" must not match "base").
+_SECTION_HEADING_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("executive_summary", ("executive summary", "ringkasan eksekutif")),
+    (
+        "business_quality",
+        ("business quality", "kualitas bisnis", "business model", "competitive position"),
+    ),
+    (
+        "growth_analysis",
+        (
+            "growth analysis",
+            "revenue & earnings growth",
+            "revenue and earnings growth",
+            "growth",
+            "pertumbuhan",
+        ),
+    ),
+    ("profitability", ("profitability", "profitabilitas", "profit margin", "margins")),
+    (
+        "financial_health",
+        (
+            "financial health",
+            "balance sheet",
+            "cash flow",
+            "kesehatan keuangan",
+            "neraca",
+            "arus kas",
+        ),
+    ),
+    ("valuation", ("valuation", "valuasi")),
+    ("technical_position", ("technical position", "technical analysis", "technical", "teknikal")),
+    (
+        "recent_events",
+        ("recent events", "catalysts", "catalyst", "events", "news", "berita", "peristiwa"),
+    ),
+    ("risks", ("risks", "risk", "risiko")),
+    ("bull_case", ("bull case", "bullish case", "bull")),
+    ("base_case", ("base case", "base")),
+    ("bear_case", ("bear case", "bearish case", "bear")),
+    ("conclusion", ("conclusion", "kesimpulan")),
+)
+
+
+def _normalize_heading(line: str) -> Optional[str]:
+    """Return the text of a markdown heading line, or None if it is not one."""
+    stripped = line.strip()
+    if not stripped.startswith("#"):
+        return None
+    text = stripped.lstrip("#").strip()
+    # Drop leading list numbering ("1. ", "2) ", "3 - ").
+    text = re.sub(r"^\d+\s*[.)\-:]*\s*", "", text)
+    text = text.strip("*_` ").rstrip(":").strip()
+    return text or None
+
+
+def _match_section_key(heading: str) -> Optional[str]:
+    """Map a heading such as "## 4. Valuation" to its section key, else None."""
+    text = heading.lower()
+    for key, phrases in _SECTION_HEADING_MAP:
+        for phrase in phrases:
+            if re.search(rf"\b{re.escape(phrase)}\b", text):
+                return key
+    return None
+
+
 class AIResearcher:
     """
     AI-powered investment research analyst.
@@ -95,11 +191,18 @@ class AIResearcher:
     and generate structured investment research reports.
     """
 
+    # Error substrings that indicate a transient provider/router failure worth
+    # retrying (HTTP 200 error payloads, rate limits, connection/timeout errors).
+    # Shared with LLMClient (ai.llm) so both paths agree on what is retryable.
+    _TRANSIENT_ERROR_MARKERS = TRANSIENT_ERROR_MARKERS
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: str = "gpt-4o",
         base_url: Optional[str] = None,
+        timeout: Optional[float] = None,
+        total_timeout: Optional[float] = None,
     ):
         """
         Initialize the AI researcher.
@@ -108,11 +211,24 @@ class AIResearcher:
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
             model: LLM model to use (defaults to OPENAI_MODEL env var)
             base_url: Optional custom API base URL (defaults to OPENAI_BASE_URL env var)
+            timeout: Per-request timeout in seconds (defaults to OPENAI_TIMEOUT env var, else 300)
+            total_timeout: Hard ceiling on wall-clock for one logical call including
+                retries (defaults to OPENAI_TOTAL_TIMEOUT env var, else 600). Bounds
+                the worst case so a wedged provider cannot hang a web request for
+                the tens of minutes that retry multiplication would otherwise allow.
         """
         # Get config from environment or parameters
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self.model = model if model != "gpt-4o" else os.environ.get("OPENAI_MODEL", "gpt-4o")
+        # Research reports are high-reasoning output, so the default ("gpt-4o"
+        # means "not explicitly chosen") resolves to the STRONG tier.
+        self.model = model if model != "gpt-4o" else resolve_model(TIER_STRONG)
         self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        self.timeout = timeout if timeout is not None else float(
+            os.environ.get("OPENAI_TIMEOUT", "300")
+        )
+        self.total_timeout = total_timeout if total_timeout is not None else float(
+            os.environ.get("OPENAI_TOTAL_TIMEOUT", "600")
+        )
 
         # Debug: print config status (only in development)
         if not self.api_key:
@@ -129,11 +245,15 @@ class AIResearcher:
             try:
                 print(f"[DEBUG] Initializing OpenAI client with model: {self.model}")
                 print(f"[DEBUG] Base URL: {self.base_url}")
-                # Add timeout to prevent hanging
+                # Timeout prevents hanging; generous default for slow models/proxies.
+                # max_retries=0: the OpenAI SDK retries 2x by default, which would
+                # multiply with this class's own retry loop (3 x 3 x timeout ~ 45min)
+                # and hang the request. Retries are owned by _call_llm instead.
                 self._client = OpenAI(
                     api_key=self.api_key,
                     base_url=self.base_url,
-                    timeout=30.0  # 30 second timeout
+                    timeout=self.timeout,
+                    max_retries=0,
                 )
                 print(f"OpenAI client initialized successfully")
             except Exception as e:
@@ -156,6 +276,7 @@ class AIResearcher:
         historical_data: Dict[str, Any],
         company_info: Optional[Dict[str, Any]] = None,
         news_data: Optional[Dict[str, Any]] = None,
+        macro_news_data: Optional[Dict[str, Any]] = None,
         price_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
@@ -190,10 +311,15 @@ class AIResearcher:
             context_parts.append("\n### Technical Analysis")
             context_parts.append(json.dumps(technical_data, indent=2, default=str))
 
-        # Add news data
+        # Add per-ticker news
         if news_data and news_data.get("news"):
             context_parts.append("\n### Recent News")
             context_parts.append(json.dumps(news_data, indent=2, default=str))
+
+        # Add macro/economic news
+        if macro_news_data and macro_news_data.get("news"):
+            context_parts.append("\n### Macro News")
+            context_parts.append(json.dumps(macro_news_data, indent=2, default=str))
 
         # Add historical data
         if historical_data:
@@ -324,12 +450,21 @@ class AIResearcher:
         )
         report.business_quality = "\n".join(table) + "\n\n**Kesimpulan:** " + conclusion
 
-    def _call_llm(self, messages: List[Dict[str, str]]) -> str:
+    def _call_llm(self, messages: List[Dict[str, str]], max_retries: int = 2) -> str:
         """
         Call LLM with messages and return response.
 
+        Transient provider failures (service_unavailable, rate limit, timeouts)
+        are retried with backoff, but bounded by ``self.total_timeout`` so the
+        whole logical call cannot exceed a predictable wall-clock budget. If a
+        configured provider still fails, this raises instead of returning the
+        mock report: a mock saved as a real report would mislead the user and
+        block regeneration for 24h via the recency debounce. The mock is only
+        used when no client/key is set.
+
         Args:
             messages: List of message dictionaries with 'role' and 'content'
+            max_retries: Extra attempts after the first for transient errors
 
         Returns:
             LLM response text
@@ -338,24 +473,71 @@ class AIResearcher:
             print("[DEBUG] No client available, using mock response")
             return self._mock_llm_response(messages)
 
-        try:
-            print(f"[DEBUG] Calling LLM with model: {self.model}")
-            print(f"[DEBUG] Sending {len(messages)} messages")
+        deadline = time.monotonic() + self.total_timeout
+        last_error = ""
+        for attempt in range(max_retries + 1):
+            try:
+                print(f"[DEBUG] Calling LLM with model: {self.model}")
+                print(f"[DEBUG] Sending {len(messages)} messages")
 
-            # Use streaming with timeout to prevent hanging
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.3,
-                max_tokens=4096,
-                timeout=30,  # 30 second timeout for the request
-                stream=False,
-            )
-            print("[DEBUG] LLM response received successfully")
-            return response.choices[0].message.content or ""
-        except Exception as e:
-            print(f"LLM call failed: {e}")
-            return self._mock_llm_response(messages)
+                # Per-request timeout, configurable via OPENAI_TIMEOUT to accommodate
+                # slow models/proxies when generating comprehensive analysis.
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.3,
+                    max_tokens=4096,
+                    timeout=self.timeout,
+                    stream=False,
+                )
+
+                # Some routers answer HTTP 200 with an error payload (choices is
+                # None plus a top-level 'error' field) OR with the error text as
+                # the message content; surface both instead of storing garbage.
+                message = provider_error(response)
+                content = None
+                if message is None:
+                    content = response.choices[0].message.content
+                    if not (content or "").strip():
+                        message = "LLM provider error (empty_content): response returned no content"
+                    else:
+                        message = content_error(content)
+                if message is not None:
+                    raise RuntimeError(message)
+
+                print("[DEBUG] LLM response received successfully")
+                return content or ""
+            except Exception as e:
+                last_error = str(e)
+                transient = any(
+                    marker in last_error.lower()
+                    for marker in self._TRANSIENT_ERROR_MARKERS
+                )
+                delay = 2 * (attempt + 1)
+                # Only retry when the error is transient, attempts remain, and a
+                # further full request can still finish inside the time budget.
+                if (
+                    attempt < max_retries
+                    and transient
+                    and time.monotonic() + delay + self.timeout <= deadline
+                ):
+                    print(
+                        f"LLM call failed ({last_error}); retrying in {delay}s "
+                        f"(attempt {attempt + 2}/{max_retries + 1})"
+                    )
+                    time.sleep(delay)
+                    continue
+                if not transient:
+                    print(f"LLM call failed (non-transient, no retry): {last_error}")
+                else:
+                    print(f"LLM call failed (no attempts/time budget left): {last_error}")
+                raise RuntimeError(
+                    f"LLM call failed: {last_error} "
+                    f"(attempts={attempt + 1}, per_request_timeout={self.timeout:g}s, "
+                    f"total_budget={self.total_timeout:g}s; "
+                    f"tune OPENAI_TIMEOUT / OPENAI_TOTAL_TIMEOUT)"
+                ) from e
+        raise RuntimeError(f"LLM call failed: {last_error}")
 
     def _mock_llm_response(self, messages: List[Dict[str, str]]) -> str:
         """
@@ -412,6 +594,7 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         technical_data: Optional[Dict[str, Any]],
         company_info: Optional[Dict[str, Any]],
         news_data: Optional[Dict[str, Any]],
+        macro_news_data: Optional[Dict[str, Any]] = None,
     ) -> float:
         """Deterministic confidence from data completeness (never invented).
 
@@ -448,6 +631,7 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         tech = technical_data or {}
         tech_ok = bool(tech.get("indicators") or tech.get("signals"))
         news_ok = bool((news_data or {}).get("news"))
+        macro_ok = bool((macro_news_data or {}).get("news"))
 
         score = (
             0.15 * (1.0 if price_ok else 0.0)
@@ -455,7 +639,8 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
             + 0.25 * fund_score
             + 0.15 * val_score
             + 0.20 * (1.0 if tech_ok else 0.0)
-            + 0.15 * (1.0 if news_ok else 0.0)
+            + 0.10 * (1.0 if news_ok else 0.0)
+            + 0.05 * (1.0 if macro_ok else 0.0)
         )
         return round(min(score, 1.0), 2)
 
@@ -508,9 +693,17 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         news_data = get_company_news(ticker, limit=5)
         print(f"[DEBUG] News data loaded: {news_data is not None}")
 
+        print("[DEBUG] Loading macro news...")
+        macro_news_data = get_macro_news(limit=5)
+        print(f"[DEBUG] Macro news data loaded: {macro_news_data is not None}")
+
         historical_data = {}
         if include_history:
-            historical_data = {"note": "Historical data not available in mock mode"}
+            # Load the real multi-period history (price/financial history) from the
+            # data loader instead of a hardcoded "not available" stub.
+            print("[DEBUG] Loading historical analysis...")
+            historical_data = get_historical_analysis(ticker)
+            print(f"[DEBUG] Historical periods: {historical_data.get('periods', 'n/a')}")
 
         # Prepare data context
         print("[DEBUG] Preparing data context...")
@@ -522,6 +715,7 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
             historical_data=historical_data,
             company_info=company_info,
             news_data=news_data,
+            macro_news_data=macro_news_data,
             price_data=price_data,
         )
         print(f"[DEBUG] Data context length: {len(data_context)} chars")
@@ -546,8 +740,8 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
 
         # Deterministically fill recent_events/risks from real news so the
         # report never shows empty sections when news exists (facts from data,
-        # not invented by the LLM).
-        self._fill_news_sections(report, news_data)
+        # not invented by the LLM). Consider per-ticker and macro news together.
+        self._fill_news_sections(report, _merge_news(news_data, macro_news_data))
 
         # Fill business_quality from deterministic fundamentals when the LLM
         # left it empty.
@@ -562,6 +756,8 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         ]
         if news_data and news_data.get("news"):
             report.data_sources.append("company_news")
+        if macro_news_data and macro_news_data.get("news"):
+            report.data_sources.append("macro_news")
         if include_history:
             report.data_sources.append("historical_analysis")
 
@@ -573,6 +769,7 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
             technical_data=technical_data,
             company_info=company_info,
             news_data=news_data,
+            macro_news_data=macro_news_data,
         )
 
         return report
@@ -653,7 +850,8 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         # Retrieve data
         fundamental_data = get_fundamental_analysis(ticker)
         valuation_data = get_valuation(ticker)
-        historical_data = {"note": "Historical data not available in mock mode"}
+        # Load the real multi-period history instead of a hardcoded stub.
+        historical_data = get_historical_analysis(ticker)
 
         data_context = self._prepare_data_context(
             ticker=ticker,
@@ -693,86 +891,53 @@ This is a mock response. To enable AI analysis, please set the OPENAI_API_KEY en
         """
         Parse LLM response into structured report sections.
 
-        Attempts to extract sections from the response text.
-        Falls back to placing full response in executive summary if parsing fails.
+        Headings are mapped deterministically (see ``_SECTION_HEADING_MAP``).
+        Content before the first heading is kept as the executive-summary
+        fallback, and unseen headings never copy another section verbatim.
         """
-        # Try to parse structured sections
-        sections = {
-            "executive_summary": "",
-            "business_quality": "",
-            "growth_analysis": "",
-            "profitability": "",
-            "financial_health": "",
-            "valuation": "",
-            "technical_position": "",
-            "recent_events": "",
-            "risks": "",
-            "bull_case": "",
-            "base_case": "",
-            "bear_case": "",
-            "conclusion": "",
-        }
+        sections = {field: "" for field in REPORT_SECTION_FIELDS}
 
-        # Simple section extraction by headers (robust to '## 4. Valuation' style).
         current_section = None
-        lines = response.split("\n")
+        preamble_lines: List[str] = []
 
-        for line in lines:
-            line_lower = line.lower().strip()
-            # Normalise header: strip leading #, numbering, and dashes.
-            header = line_lower
-            if header.startswith("#"):
-                header = header.lstrip("#")
-                header = re.sub(r"^[\s\d.\-]+", "", header).strip()
+        for line in response.split("\n"):
+            heading = _normalize_heading(line)
+            if heading is not None:
+                key = _match_section_key(heading)
+                if key is not None:
+                    current_section = key
+                # An unrecognised heading is only a boundary: current_section is
+                # kept so its body is not silently dropped.
+                continue
 
-            is_header = header != line_lower  # it was a markdown heading
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if current_section is None:
+                preamble_lines.append(stripped)
+            elif not sections[current_section]:
+                sections[current_section] = stripped
+            else:
+                sections[current_section] += "\n" + stripped
 
-            # Check for section headers ONLY on actual markdown headings.
-            if is_header:
-                if "executive summary" in header or "summary" in header:
-                    current_section = "executive_summary"
-                elif "business quality" in header or "quality" in header:
-                    current_section = "business_quality"
-                elif "growth" in header or "revenue" in header or "earnings" in header:
-                    current_section = "growth_analysis"
-                elif "profitability" in header:
-                    current_section = "profitability"
-                elif "financial health" in header or "balance sheet" in header or "financial" in header:
-                    current_section = "financial_health"
-                elif "valuation" in header:
-                    current_section = "valuation"
-                elif "technical" in header:
-                    current_section = "technical_position"
-                elif "recent events" in header or "catalyst" in header or "news" in header:
-                    current_section = "recent_events"
-                elif "risk" in header:
-                    current_section = "risks"
-                elif "bull case" in header or "bullish case" in header:
-                    current_section = "bull_case"
-                elif "base case" in header:
-                    current_section = "base_case"
-                elif "bear case" in header or "bearish case" in header:
-                    current_section = "bear_case"
-                elif "conclusion" in header:
-                    current_section = "conclusion"
-            elif current_section and line.strip():
-                # Add content to current section (non-header line)
-                if not sections[current_section]:
-                    sections[current_section] = line.strip()
-                else:
-                    sections[current_section] += "\n" + line.strip()
-
-        # If no sections were parsed, put everything in executive summary
+        # Nothing recognisable at all: keep the raw response so nothing is lost.
         if not any(sections.values()):
-            sections["executive_summary"] = response
+            sections["executive_summary"] = response.strip()
 
-        # Ensure a usable executive summary exists even when the LLM didn't emit
-        # a dedicated header: fall back to the conclusion, then any section.
+        # Fill a missing executive summary from the model's opening paragraph.
+        # Never copy another section verbatim: that duplicated e.g.
+        # ``business_quality`` into the executive summary on every report.
         if not sections["executive_summary"]:
-            sections["executive_summary"] = (
-                sections["conclusion"]
-                or next((v for v in sections.values() if v), "")
-            )
+            preamble = "\n".join(preamble_lines).strip()
+            if preamble:
+                sections["executive_summary"] = preamble
+            else:
+                verdict = _derive_verdict(response)
+                sections["executive_summary"] = (
+                    f"Overall verdict: {verdict}."
+                    if verdict
+                    else "No executive summary was provided; see the sections below."
+                )
 
         return ResearchReport(
             ticker=ticker,

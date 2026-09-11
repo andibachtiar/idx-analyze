@@ -274,6 +274,12 @@ class TestDashboardEndpoints:
             "count": 2,
         }
         monkeypatch.setattr("api.main.run_screening", MagicMock(return_value=screen_result))
+        # Isolate the LLM: the endpoint's LLMClient would otherwise make a real
+        # network call (OPENAI_API_KEY is set in .env), making the test slow.
+        llm_client = MagicMock()
+        llm_client.is_available = True
+        llm_client.analyze_with_prompt.return_value = {"content": "Mock AI interpretation"}
+        monkeypatch.setattr("ai.llm.LLMClient", MagicMock(return_value=llm_client))
         # Isolate persistence: avoid a real DB write during the test.
         fake_store = MagicMock()
         fake_store.save_screen_analysis.return_value = 99
@@ -286,7 +292,7 @@ class TestDashboardEndpoints:
         assert data["count"] == 2
         assert data["passed"] == 1
         assert data["results"][0]["ticker"] == "BBCA"
-        assert "llm_analysis" in data
+        assert data["llm_analysis"] == "Mock AI interpretation"
         assert data["analysis_id"] == 99
 
     def test_screen_analysis_history(self, client, monkeypatch):
@@ -659,6 +665,8 @@ class TestAIEndpoints:
         )
 
         # Patch the analyze_stock function
+        fetch_mock = MagicMock()
+        monkeypatch.setattr("api.main._fetch_fresh_ticker_news", fetch_mock)
         with patch('api.main.analyze_stock', return_value=mock_report):
             response = client.post(
                 "/ai/analyze",
@@ -667,6 +675,7 @@ class TestAIEndpoints:
             assert response.status_code == 200
             data = response.json()
             assert data["ticker"] == "BBCA"
+            fetch_mock.assert_called_once()
 
     def test_ai_compare_stocks(self, client):
         """Test AI stock comparison endpoint."""
@@ -824,6 +833,7 @@ class TestAiStreamSse:
         fake.model = "gpt-4o"
         fake.client.chat.completions.create.return_value = make_chunks()
         monkeypatch.setattr("api.main.AIResearcher", MagicMock(return_value=fake))
+        monkeypatch.setattr("api.main._fetch_fresh_ticker_news", MagicMock())
 
         response = client.post("/ai/analyze-stream", json={"ticker": "BBCA", "question": "prospek?"})
         assert response.status_code == 200
@@ -869,6 +879,112 @@ class TestResearchGenerateGuard:
         # Should NOT have regenerated or saved.
         analyze_mock.assert_not_called()
         save_mock.assert_not_called()
+
+    def test_generates_and_fetches_fresh_news_when_no_recent_report(self, client, monkeypatch):
+        """When no recent report exists, on-demand per-ticker news is fetched first."""
+        from datetime import datetime
+        from unittest.mock import MagicMock
+
+        from ai.researcher import ResearchReport
+
+        memory = MagicMock()
+        memory.get_latest_report.return_value = None
+        monkeypatch.setattr("ai.memory.ResearchMemory", MagicMock(return_value=memory))
+        save_mock = MagicMock()
+        monkeypatch.setattr("ai.memory.save_research_report", save_mock)
+        fetch_mock = MagicMock()
+        monkeypatch.setattr("api.main._fetch_fresh_ticker_news", fetch_mock)
+
+        mock_report = ResearchReport(
+            ticker="BBCA",
+            question="Is BBCA a good investment?",
+            executive_summary="Mock summary",
+            timestamp=datetime.now(),
+        )
+        # generate_research imports analyze_stock from ai.researcher *inside* the
+        # function, so the patch target must be ai.researcher (not api.main).
+        monkeypatch.setattr("ai.researcher.analyze_stock", MagicMock(return_value=mock_report))
+        # Avoid the validator / DB stamping branches.
+        monkeypatch.setattr("api.main._attach_validator", MagicMock(side_effect=lambda d: d))
+        monkeypatch.setattr("api.main._stamp_candidate_validity", MagicMock())
+
+        response = client.post("/stocks/BBCA/research/analyze?min_hours=24")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "generated"
+        assert data["report"]["ticker"] == "BBCA"
+        # On-demand news must be fetched before generating the analysis.
+        fetch_mock.assert_called_once()
+        save_mock.assert_called_once()
+
+
+class TestOnDemandNewsFetch:
+    """On-demand ticker news is only scraped when no recent news exists."""
+
+    def test_skips_scrape_when_recent_news_exists(self, monkeypatch):
+        from datetime import datetime
+        from unittest.mock import MagicMock
+
+        import api.main as m
+
+        monkeypatch.setenv("BRAVE_API_KEY", "test")
+        monkeypatch.setattr(
+            "ai.tools.get_company_news",
+            MagicMock(return_value={"news": [{"published_at": datetime.now().isoformat()}]}),
+        )
+        scrape = MagicMock()
+        monkeypatch.setattr("scrape_brave_news.scrape_brave_news", scrape)
+
+        m._fetch_fresh_ticker_news("BBCA")
+
+        scrape.assert_not_called()
+
+    def test_scrapes_when_no_recent_news(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import api.main as m
+
+        monkeypatch.setenv("BRAVE_API_KEY", "test")
+        # No stored news at all -> must fetch.
+        monkeypatch.setattr("ai.tools.get_company_news", MagicMock(return_value={"news": []}))
+        scrape = MagicMock(return_value=2)
+        monkeypatch.setattr("scrape_brave_news.scrape_brave_news", scrape)
+        monkeypatch.setattr("ai.data_loader_pg.clear_cache", MagicMock())
+
+        m._fetch_fresh_ticker_news("BBCA")
+
+        scrape.assert_called_once()
+
+    def test_scrapes_when_news_is_stale(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import api.main as m
+
+        monkeypatch.setenv("BRAVE_API_KEY", "test")
+        monkeypatch.setattr(
+            "ai.tools.get_company_news",
+            MagicMock(return_value={"news": [{"published_at": "2020-01-01T00:00:00"}]}),
+        )
+        scrape = MagicMock(return_value=1)
+        monkeypatch.setattr("scrape_brave_news.scrape_brave_news", scrape)
+        monkeypatch.setattr("ai.data_loader_pg.clear_cache", MagicMock())
+
+        m._fetch_fresh_ticker_news("BBCA")
+
+        scrape.assert_called_once()
+
+    def test_skips_when_no_brave_key(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import api.main as m
+
+        monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        scrape = MagicMock()
+        monkeypatch.setattr("scrape_brave_news.scrape_brave_news", scrape)
+
+        m._fetch_fresh_ticker_news("BBCA")
+
+        scrape.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -46,7 +46,18 @@ let aiHistory = [];
 
 async function fetchJSON(path, opts) {
   const res = await fetch(API + path, opts);
-  if (!res.ok) throw new Error("HTTP " + res.status);
+  if (!res.ok) {
+    // Surface the server's error detail (FastAPI puts it in {detail}) so the
+    // user sees e.g. "LLM provider error (service_unavailable)..." not just 400.
+    let detail = "";
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === "string" ? body.detail : "";
+    } catch (e) {
+      /* non-JSON error body */
+    }
+    throw new Error(detail || "HTTP " + res.status);
+  }
   return res.json();
 }
 
@@ -1247,9 +1258,15 @@ const ANALYSIS_LABELS = {
   gross_margin: "Gross Margin",
   operating_margin: "Operating Margin",
   net_margin: "Net Margin",
+  gross_margin_components: "Gross Margin (komponen)",
+  operating_margin_components: "Operating Margin (komponen)",
+  net_margin_components: "Net Margin (komponen)",
   roe: "ROE",
   roa: "ROA",
   roic: "ROIC",
+  roe_components: "ROE (komponen)",
+  roa_components: "ROA (komponen)",
+  roic_components: "ROIC (komponen)",
   fcf_margin: "FCF Margin",
   // Financial health
   debt_to_equity: "Debt / Equity",
@@ -1359,9 +1376,15 @@ function renderAnalysisRows(d) {
     "gross_margin",
     "operating_margin",
     "net_margin",
+    "gross_margin_components",
+    "operating_margin_components",
+    "net_margin_components",
     "roe",
     "roa",
     "roic",
+    "roe_components",
+    "roa_components",
+    "roic_components",
     "fcf_margin",
   ]);
   const html = (v, key) => {

@@ -23,6 +23,8 @@ except ImportError:
     AsyncOpenAI = None
     ChatCompletionToolParam = None
 
+# Shared with LLMClient so every OpenAI-compatible path honours the same budget.
+from ai.llm import DEFAULT_TIMEOUT_SECONDS
 
 # =============================================================================
 # DATA ACCESS LAYER
@@ -279,6 +281,11 @@ class LLMConfig:
         self.max_tokens = max_tokens
         self.enable_tools = enable_tools
         self.enable_structured_output = enable_structured_output
+        # Bound each request: the OpenAI SDK's own default (~600s x retries) lets a
+        # wedged router hang a call for tens of minutes.
+        self.timeout = float(
+            os.environ.get("OPENAI_TIMEOUT", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS
+        )
 
         self._client = None
         self._async_client = None
@@ -287,13 +294,21 @@ class LLMConfig:
         # Only create client if API key is provided
         if OpenAI is not None and self.api_key:
             try:
-                self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                self._client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    timeout=self.timeout,
+                )
             except Exception:
                 self._client = None
 
         if AsyncOpenAI is not None and self.api_key:
             try:
-                self._async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+                self._async_client = AsyncOpenAI(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    timeout=self.timeout,
+                )
             except Exception:
                 self._async_client = None
 

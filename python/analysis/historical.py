@@ -135,8 +135,9 @@ class HistoricalFinancialData:
             raw_records: List of raw financial data dictionaries
         """
         for raw in raw_records:
-            # Extract period info
-            fs_date = raw.get('fsDate') or raw.get('fs_date')
+            # Extract period info. DB rows use ``period_end``; the IDX JSON feed
+            # uses ``fsDate``/``fs_date``.
+            fs_date = raw.get('fsDate') or raw.get('fs_date') or raw.get('period_end')
             period_end = None
             if fs_date:
                 try:
@@ -144,10 +145,21 @@ class HistoricalFinancialData:
                 except (ValueError, TypeError):
                     pass
 
-            # Determine period type
+            # Determine period type: an explicit fiscal_period wins; otherwise fall
+            # back to the month heuristic used for the IDX JSON feed. Note: the
+            # stored rows often lack fiscal_period, so a Sep-30 period_end is
+            # treated as Q3 (it is ambiguous with a Sep fiscal-year end) — this
+            # keeps partial-year snapshots out of the annual YoY comparison.
             period_type = PeriodType.ANNUAL
             fiscal_period = None
-            if period_end:
+            explicit_period = raw.get('fiscal_period')
+            if explicit_period is not None:
+                period_type = PeriodType.QUARTERLY
+                try:
+                    fiscal_period = int(explicit_period)
+                except (ValueError, TypeError):
+                    fiscal_period = None
+            elif period_end:
                 month = period_end.month
                 # Only auto-detect quarters for Mar, Jun, Sep (not Dec - Dec 31 is typically annual)
                 if month in (3, 6, 9):
@@ -176,8 +188,11 @@ class HistoricalFinancialData:
         """Convert raw dictionary to FinancialMetrics object."""
         metrics = FinancialMetrics()
 
-        # Map raw fields to normalized metrics
+        # Map raw fields to normalized metrics. Keys cover BOTH the IDX JSON feed
+        # (camelCase) and the PostgreSQL ``financial_ratios`` column names returned
+        # by ``get_financial_ratio_history`` so neither source is silently dropped.
         field_mappings = {
+            # IDX raw JSON
             'sales': 'revenue',
             'profitAttrOwner': 'net_income',
             'profit_period': 'net_income',
@@ -193,6 +208,32 @@ class HistoricalFinancialData:
             'per': 'pe_ratio',
             'price_bv': 'pb_ratio',
             'npm': 'net_margin',
+            # PostgreSQL financial_ratios columns
+            'revenue': 'revenue',
+            'net_income': 'net_income',
+            'operating_income': 'operating_income',
+            'gross_profit': 'gross_profit',
+            'cost_of_goods_sold': 'cost_of_goods_sold',
+            'interest_expense': 'interest_expense',
+            'total_assets': 'total_assets',
+            'total_liabilities': 'total_liabilities',
+            'total_equity': 'total_equity',
+            'total_debt': 'total_debt',
+            'cash_and_equivalents': 'cash_and_equivalents',
+            'operating_cash_flow': 'operating_cash_flow',
+            'capital_expenditures': 'capital_expenditures',
+            'roic': 'roic',
+            'debt_to_equity': 'debt_to_equity',
+            'current_ratio': 'current_ratio',
+            'pe_ratio': 'pe_ratio',
+            'pb_ratio': 'pb_ratio',
+            'ev_ebitda': 'ev_ebitda',
+            'net_margin': 'net_margin',
+            'operating_margin': 'operating_margin',
+            'gross_margin': 'gross_margin',
+            'revenue_cagr': 'revenue_cagr_3y',
+            'earnings_cagr': 'earnings_cagr_3y',
+            'eps_cagr': 'eps_cagr_3y',
         }
 
         for raw_key, metric_name in field_mappings.items():

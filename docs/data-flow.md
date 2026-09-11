@@ -51,24 +51,24 @@ flowchart TD
 `run_pipeline.py` menjalankan scraper secara berurutan. Urutan penting agar tabel yang
 punya "relasi" (mis. harga milik perusahaan) tidak error.
 
-| Urut | Step `pipeline`     | Data yang diambil                                     | Sumber        |
-| ---- | ------------------- | ----------------------------------------------------- | ------------- |
-| 1    | `companies`         | Daftar & profil perusahaan (nama, sektor, listing)    | IDX           |
-| 2    | `prices`            | Harga harian (OHLCV) — hanya tanggal yang belum ada   | IDX           |
-| 3    | `financial_ratio`   | Rasio keuangan terbaru (P/E, ROE, dll.)               | IDX           |
-| 4    | `yfinance`          | Bonus dari Yahoo: dividend yield, current ratio, CAGR | Yahoo Finance |
-| 5    | `financial_history` | Riwayat fundamental multi-tahun (grafik)              | Yahoo Finance |
-| 6    | `news`              | Berita IDX                                            | IDX           |
-| 7    | `news_link`         | Menautkan berita → ticker (kode saham)                | dihitung      |
-| 8    | `company_news`      | Berita per saham                                      | Yahoo Finance |
-| 9    | `news_brave`        | Berita **makro/ekonomi/politik** (lewat Brave)        | Brave Search  |
-| 10   | `news_impacts`      | Tag "berita ini → sektor mana, naik/turun"            | dihitung      |
+| Urut | Step `pipeline`       | Data yang diambil                                     | Sumber        |
+| ---- | --------------------- | ----------------------------------------------------- | ------------- |
+| 1    | `companies`           | Daftar & profil perusahaan (nama, sektor, listing)    | IDX           |
+| 2    | `prices`              | Harga harian (OHLCV) — hanya tanggal yang belum ada   | IDX           |
+| 3    | `financial_ratio`     | Rasio keuangan terbaru (P/E, ROE, dll.)               | IDX           |
+| 4    | `yfinance`            | Bonus dari Yahoo: dividend yield, current ratio, CAGR | Yahoo Finance |
+| 5    | `financial_history`   | Riwayat fundamental multi-tahun (grafik)              | Yahoo Finance |
+| 6    | `news_brave`          | Berita **makro/ekonomi/politik** (lewat Brave)        | Brave Search  |
+| 7    | `news_impacts`        | Tag "berita ini → sektor mana, naik/turun"            | dihitung      |
+| 8    | `research_candidates` | Kandidat riset dari dampak berita (rank/baseline)     | dihitung      |
+| 9    | `research_analyze`    | Analisa AI menyeluruh untuk kandidat (opsional)       | AI (opsional) |
 
 **Penting soal berita & sumber:**
 
 - Berita **makro** (ekonomi, kebijakan, komoditas) itu bagus untuk **memprediksi dampak** ke sektor/saham.
 - Filter `BRAVE_SOURCES` memastikan hanya sumber berita **tepercaya** yang dipakai.
 - Setiap berita diberi `news_code = hash(url)` supaya **tidak duplikat** saat dijalankan ulang.
+- Berita **per-ticker** tidak dijalankan otomatis di pipeline; diambil **on-demand** saat kamu klik _analisis menyeluruh_ (tergantung kebutuhan terbaru saham itu).
 
 ```mermaid
 flowchart LR
@@ -77,21 +77,17 @@ flowchart LR
     IDX --> pipe3[scrape_financial_ratio]
     YF[Yahoo Finance] --> pipe4[scrape_yahoo_financial_fields]
     YF --> pipe5[backfill_financial_history]
-    IDX --> pipe6[scrape_idx_news]
-    pipe7[enrich_news_tickers]
-    YF --> pipe8[scrape_company_news]
-    Brave[Brave Search] --> pipe9[scrape_brave_news --macro]
-    pipe10[enrich_news_impacts]
+    Brave[Brave Search] --> pipe6[scrape_brave_news --macro]
+    pipe7[enrich_news_impacts]
+    pipe8[generate_research_candidates]
     pipe1 --> DB[(PostgreSQL)]
     pipe2 --> DB
     pipe3 --> DB
     pipe4 --> DB
     pipe5 --> DB
-    pipe6 --> pipe7
+    pipe6 --> DB
     pipe7 --> DB
     pipe8 --> DB
-    pipe9 --> DB
-    pipe10 --> DB
 ```
 
 ---

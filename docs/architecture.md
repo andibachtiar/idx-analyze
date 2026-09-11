@@ -1,35 +1,63 @@
-# Current Architecture — idx-bei Project
+# Current Architecture — IDX-BEI Investment Research Platform
 
 ## Overview
 
-The `idx-bei` project is a Python-based data collection and analysis toolkit for Indonesian stocks (IDX/BEI). It scrapes data from IDX (Indonesia Stock Exchange) and Yahoo Finance, stores it in PostgreSQL and Neo4j databases, and provides basic stock screening functionality.
+The `idx-bei` project has grown into an **AI-assisted Indonesian stock research and
+investment analysis platform**. It collects data from IDX (Indonesia Stock
+Exchange), Yahoo Finance and Brave Search, stores structured data in PostgreSQL
+(and relationships in Neo4j), runs deterministic fundamental/technical/valuation
+engines, and provides an optional AI research-analyst layer on top of that data.
+
+> This document was originally written during Phase 0 (repository audit). The
+> architecture below has since been substantially extended — the authoritative,
+> current overview lives in `AGENTS.md` and `docs/data-pipeline.md`. This page
+> keeps the high-level shape plus a corrected "Known Limitations" section.
 
 **Repository:** https://github.com/nichsedge/idx-bei  
 **Python Version:** >=3.13  
-**Package Manager:** uv
+**Package Manager:** uv  
+**Run tests:** `uv run pytest tests/ -q -k "not Integration"`
 
 ---
 
 ## Data Flow
 
 ```
-IDX API (www.idx.co.id) ──┐
-                          ├──► JSON Files (data/) ──► PostgreSQL (financial_ratios)
-Yahoo Finance API         │                              └──► Neo4j (companies, relationships)
-                          │
-                          └──► Analysis Scripts ──► Output
+IDX / Yahoo / Brave Search (external)
+            │
+            ▼
+   run_pipeline.py  (companies → prices → financial_ratio → yfinance →
+                    financial_history → news_brave → news_impacts → research_candidates)
+            │
+            ▼
+        PostgreSQL (structured) ──► Neo4j (relationships)
+            │
+            ▼
+   Deterministic engines (fundamental / technical / valuation / screening / news-impact)
+            │
+            ▼
+   API (FastAPI) ──► Dashboard
+            │
+            ▼
+   AI researcher (optional; interprets, never invents numbers)
 ```
 
-### Scrapers (Data Collection Layer)
+> The precise, current pipeline order and scheduling are documented in
+> `docs/data-pipeline.md`. The table below lists the scraper scripts.
 
-| Script                       | Source                  | Data Collected                                           | Output                                 |
-| ---------------------------- | ----------------------- | -------------------------------------------------------- | -------------------------------------- |
-| `scrape_company_profiles.py` | IDX Listed Company API  | Company profiles, directors, commissioners, shareholders | `data/companyDetailsByKodeEmiten.json` |
-| `scrape_financial_ratio.py`  | IDX Financial Ratio API | Financial ratios per company per period                  | `data/financial_ratio.json`            |
-| `scrape_broker_search.py`    | IDX Broker Search API   | Broker directory                                         | `data/brokerSearch.json`               |
-| `scrape_index_summary.py`    | IDX Trading Summary API | Index summary data                                       | `index_summary.json`                   |
-| `scrape_idx_news.py`         | IDX News API            | Stock news articles                                      | `data/news/`                           |
-| `yfinance_data.py`           | Yahoo Finance           | Financial ratios, holders, insiders                      | CSV files                              |
+### Scrapers / Pipeline (Data Collection Layer)
+
+| Script / step                      | Source                  | Data Collected                                           | Sink                               |
+| ---------------------------------- | ----------------------- | -------------------------------------------------------- | ---------------------------------- |
+| `scrape_company_profiles.py`       | IDX Listed Company API  | Company profiles, directors, commissioners, shareholders | PostgreSQL (`companies`)           |
+| `scrape_stock_prices.py`           | IDX                     | Daily OHLCV prices (incremental)                         | PostgreSQL (`stock_prices`)        |
+| `scrape_financial_ratio.py`        | IDX Financial Ratio API | Financial ratios per company per period                  | PostgreSQL (`financial_ratios`)    |
+| `scrape_yahoo_financial_fields.py` | Yahoo Finance           | Dividend yield, current ratio, payout, CAGR, EPS CAGR    | PostgreSQL (`financial_ratios`)    |
+| `backfill_financial_history.py`    | Yahoo Finance           | Multi-year financial history                             | PostgreSQL (`financial_ratios`)    |
+| `scrape_brave_news.py`             | Brave Search            | Per-ticker + macro news                                  | PostgreSQL (`news_articles`)       |
+| `enrich_news_impacts.py`           | computed                | News → sector/direction impact tags                      | PostgreSQL (`news_impacts`)        |
+| `generate_research_candidates.py`  | computed                | Macro-driven research candidates                         | PostgreSQL (`research_candidates`) |
+| `scheduler.py`                     | —                       | Runs the pipeline on a cadence, then clears cache        | —                                  |
 
 ### Data Processing Layer
 
@@ -165,14 +193,24 @@ services:
 
 ## Known Limitations
 
-1. **No data normalization** — Raw field names stored as-is; no handling of inconsistent units/signs
-2. **No time-series storage** — Financial data stored flat without period relationship tracking
-3. **Limited testing** — Only 2 test files covering error cases (file not found) and URL building
-4. **No idempotent ingestion** — Re-running scrapers creates duplicates in PostgreSQL
-5. **No error recovery** — Scrapers fail hard on rate limits without exponential backoff
-6. **Hardcoded paths** — Some scripts assume specific working directories
-7. **Syntax errors** — `scrape_financial_ratio.py:129` has broken f-string
-8. **Incomplete code** — `stock_analysis_psql.py` has early return inside wrong block
+1. **iXBRL fundamentals incomplete** — `gross_profit`, `total_debt`,
+   `interest_expense`, `operating_cash_flow`, `capital_expenditures` are not yet
+   sourced reliably (IDX ratio API + yfinance don't provide them). The orphan
+   `ixbrl.py` needs a rewrite to parse inline XBRL from official filings.
+2. **News ticker relevance** — Brave sometimes tags unrelated entities to a short
+   ticker query (e.g. "SICO" → Sigma Lithium). A deterministic relevance gate
+   (`news_relevance.py`) prunes false positives at ingest, at the cost of
+   possibly missing short brands without an acronym (precision > recall).
+3. **News ingest source** — `scrape_company_news.py` (yfinance) still tags
+   tickers without the relevance gate; not proven to pollute, but
+   `prune_irrelevant_news.py` is source-agnostic and can clean it anytime.
+4. **Docs drift** — some legacy docs lag the code. This page's historical sections
+   (DB column names, dependencies, Docker) predate later refactors.
+
+> The Phase 0-era "Known Limitations" (no idempotent ingestion, only 2 test files,
+> syntax errors in `scrape_financial_ratio.py`, hardcoded paths) are **resolved**:
+> ingestion is idempotent (upsert + stable SHA-1 dedup), the suite is ~1070 tests
+> across dozens of files, and the scraper f-string bugs are fixed.
 
 ---
 

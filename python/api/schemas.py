@@ -281,6 +281,7 @@ class ResearchReportResponse(BaseModel):
     generated_at: str
     confidence_score: float
     overall_verdict: str
+    data_sources: List[str] = Field(default_factory=list)
     claim_summary: Dict[str, int]
     sections: Dict[str, Any]
 

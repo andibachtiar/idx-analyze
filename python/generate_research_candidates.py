@@ -31,7 +31,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from ai.llm import LLMClient
+from ai.llm import TIER_FAST, llm_client_for
 from ai.prompts.macro_impact import generate_research_candidates as _generate
 
 
@@ -53,7 +53,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print plan only")
     args = parser.parse_args()
 
-    llm_client = LLMClient() if args.use_llm else None
+    llm_client = llm_client_for(TIER_FAST) if args.use_llm else None
     result = _generate(
         hours=args.hours,
         top_sectors=args.top_sectors,

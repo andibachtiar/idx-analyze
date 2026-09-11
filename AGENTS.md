@@ -3,8 +3,8 @@
 ## Current Status
 
 **Project:** IDX-BEI Investment Research Platform  
-**Last Updated:** 2026-08-23
-**Status:** All core phases complete (0-22), ready for Phase 23
+**Last Updated:** 2026-09-11
+**Status:** All core phases complete (0-26), including data pipeline (24), UI/UX (25) and real-time updates (26)
 
 ### Completed Phases Summary
 
@@ -41,11 +41,11 @@
 
 ## Pending Phases
 
-| Phase | Name                      | Description                  | Status         |
-| ----- | ------------------------- | ---------------------------- | -------------- |
-| 24    | Data Pipeline Integration | Connect scrapers to AI tools | ✅ Complete    |
-| 25    | UI/UX Enhancement         | Dashboard & stock page UI    | 🟡 In Progress |
-| 26    | Real-time Data Updates    | Scheduled scraping + caching | ✅ Complete    |
+| Phase | Name                      | Description                  | Status      |
+| ----- | ------------------------- | ---------------------------- | ----------- |
+| 24    | Data Pipeline Integration | Connect scrapers to AI tools | ✅ Complete |
+| 25    | UI/UX Enhancement         | Dashboard & stock page UI    | ✅ Complete |
+| 26    | Real-time Data Updates    | Scheduled scraping + caching | ✅ Complete |
 
 ### Phase 25 — UI/UX Iterasi 1 & 2 (Selesai)
 
@@ -65,14 +65,14 @@
 ### Phase 24 — Data Pipeline Integration (Selesai)
 
 - **Scraper → PostgreSQL → AI tools terhubung**: semua scraper menulis ke DB via `ScraperDatabase` (idempotent `upsert_*`/`insert_news`), dibaca oleh `PostgreSQLDataLoader` untuk AI tools (`get_stock_price`, `get_financial_ratios`, `get_price_history`, `list_stock_metrics`, `get_news`).
-- **Orkestrasi `run_pipeline.py`**: satu entry point berurutan (`companies → prices → financial_ratio → yfinance → financial_history → news → news_link → company_news`) dengan retry/backoff, structured logging (`logs/pipeline.log`), dan failure ledger (`data/pipeline_ledger.jsonl`). `scrape_stock_prices` incremental via `stored_dates` (hanya fetch missing dates).
+- **Orkestrasi `run_pipeline.py`**: satu entry point berurutan (`companies → prices → financial_ratio → yfinance → financial_history → news_brave → news_impacts → research_candidates → research_analyze`) dengan retry/backoff, structured logging (`logs/pipeline.log`), dan failure ledger (`data/pipeline_ledger.jsonl`). `scrape_stock_prices` incremental via `stored_dates` (hanya fetch missing dates).
 - **Fix dedup berita deterministik**: ganti `abs(hash(url/title))` (non-deterministik karena `PYTHONHASHSEED`) dengan SHA-1 (`_stable_hash`) di `insert_news` & `scrape_company_news.py`, agar re-run tidak menduplikat artikel (ON CONFLICT news_code).
 - **Validasi numerik terpusat**: `_number` kini menolak NaN/Inf agar tidak mencemari kolom numerik; `backfill_financial_history.py` menormalisasi unit yfinance ke konvensi IDX (moneter ÷ 1e9, margin × 100).
 - **Data riil terisi**: 973 perusahaan, 429.718 harga, 2.886 financial_ratios (+multitahun via backfill), 2.484 berita (799 ter-link).
 
 ### Phase 26 — Real-time Data Updates (Selesai)
 
-- **Scraping dijalankan oleh pipeline, bukan manual**: `run_pipeline.py` adalah satu-satunya entry point yang menarik semua scraper berurutan (`companies → prices → financial_ratio → yfinance → financial_history → news → news_link → company_news`) dengan retry/backoff, logging (`logs/pipeline.log`), dan failure ledger. Jalankan dengan `uv run python run_pipeline.py --all` (atau `--steps prices,news` untuk subset).
+- **Scraping dijalankan oleh pipeline, bukan manual**: `run_pipeline.py` adalah satu-satunya entry point yang menarik semua scraper berurutan (`companies → prices → financial_ratio → yfinance → financial_history → news_brave → news_impacts → research_candidates → research_analyze`) dengan retry/backoff, logging (`logs/pipeline.log`), dan failure ledger. Jalankan dengan `uv run python run_pipeline.py --all` (atau `--steps prices,news_brave` untuk subset).
 - **Scheduling `scheduler.py`**: daemon loop yang menfiap Pipeline pada jadwal (env `SCRAPE_SCHEDULE_TIME` HH:MM Harian Asia/Jakarta, atau `SCRAPE_INTERVAL_HOURS` default 24h). Setiap selesai menjalankan `clear_cache()` agar API langsung membaca data baru. Semua stdlib (zoneinfo + subprocess), tanpa Celery/Redis.
 - **Read cache TTL**: `PostgreSQLDataLoader` kini mem-cache hasil baca yang sering dipanggil (`list_stocks`, `list_stock_metrics`, `get_price_history`, `get_news`, `get_financial_ratios`, `get_financial_ratio_history`, dll.) selama `DATA_CACHE_TTL` detik (default 60, 0 = mati). `_ttl_cache` decorator menjaga hit per-argumen & thread-safe-ish; `clear_cache()` membatalkannya setelah pipeline.
 - **Documentasi**: `docs/data-pipeline.md` menjelaskan bahwa scraping dilakukan oleh pipeline & cara menjalan/menjadwalkannya.

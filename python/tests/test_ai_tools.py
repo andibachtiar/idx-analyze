@@ -541,5 +541,218 @@ class TestTechnicalScreen:
         assert "BAD" not in passed
 
 
+class TestHistoricalAutoLoad:
+    """get_historical_analysis auto-loads stored multi-period history."""
+
+    def test_auto_loads_from_loader(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        loader.get_financial_ratio_history.return_value = [
+            {"fiscal_year": 2023, "fiscal_period": None, "period_end": "2023-12-31",
+             "revenue": 10000.0, "net_income": 1500.0, "eps": 150.0},
+            {"fiscal_year": 2024, "fiscal_period": None, "period_end": "2024-12-31",
+             "revenue": 12000.0, "net_income": 1800.0, "eps": 180.0},
+        ]
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_historical_analysis("BBCA")
+
+        assert result["growth"]["revenue"]["value"] == 0.2  # 12000 / 10000 - 1
+        loader.get_financial_ratio_history.assert_called_once_with("BBCA")
+
+    def test_notes_when_fewer_than_two_periods(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        loader.get_financial_ratio_history.return_value = [
+            {"fiscal_year": 2024, "fiscal_period": None, "period_end": "2024-12-31",
+             "revenue": 10000.0},
+        ]
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_historical_analysis("BBCA")
+
+        assert result["periods"] == 1
+        assert "Historical financial data not available" in result["notes"]
+
+
+class TestFundamentalMergedRatios:
+    """get_fundamental_analysis prefers the merged ratio snapshot."""
+
+    def test_prefers_merged_over_latest_row(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        # Merged snapshot carries fields the latest sparse row lacks.
+        loader.get_financial_ratios_merged.return_value = {
+            "net_income": 20000.0, "total_equity": 60000.0, "eps": 467.0,
+            "debt_to_equity": 0.18, "current_ratio": 7.21,
+        }
+        loader.get_financial_ratios.return_value = {"net_income": 20000.0}
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_fundamental_analysis("BBCA")
+
+        loader.get_financial_ratios_merged.assert_called_once_with("BBCA")
+        assert result["financial_health"]["debt_to_equity"]["value"] == 0.18
+        assert result["financial_health"]["current_ratio"]["value"] == 7.21
+
+    def test_falls_back_when_merge_helper_absent(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        class _Loader:
+            def get_financial_ratios(self, ticker):
+                return {"net_income": 1000.0, "total_equity": 5000.0, "eps": 100.0}
+
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=_Loader()))
+
+        result = tools.get_fundamental_analysis("BBCA")
+
+        # ROE recomputed from components: 1000 / 5000.
+        assert result["profitability"]["roe"]["value"] == 0.2
+
+    def test_profitability_exposes_component_roe_roa(self, monkeypatch):
+        """Both the stored and the component-derived ROE/ROA are surfaced."""
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        loader.get_financial_ratios_merged.return_value = {
+            "net_income": 1500.0, "total_equity": 10000.0,
+            "total_assets": 20000.0, "eps": 150.0,
+            "roe": 18.5, "roa": 8.4,
+        }
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_fundamental_analysis("BBCA")["profitability"]
+
+        # Stored IDX figures (percent -> decimal).
+        assert result["roe"]["value"] == 0.185
+        assert result["roa"]["value"] == 0.084
+        # Component-derived companions for reconciliation.
+        assert result["roe_components"]["value"] == 0.15
+        assert result["roa_components"]["value"] == 0.075
+
+    def test_profitability_exposes_component_margins(self, monkeypatch):
+        """Stored margins and their component-derived companions both surface."""
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        loader.get_financial_ratios_merged.return_value = {
+            "revenue": 10000.0, "gross_profit": 4000.0, "operating_income": 1500.0,
+            "net_income": 1200.0, "eps": 120.0,
+            # Stored margins are percent-scale in the DB row.
+            "gross_margin": 42.0, "operating_margin": 17.0, "net_margin": 15.0,
+        }
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_fundamental_analysis("BBCA")["profitability"]
+
+        assert result["gross_margin"]["value"] == 0.42
+        assert result["gross_margin_components"]["value"] == 0.40
+        assert result["operating_margin"]["value"] == 0.17
+        assert result["operating_margin_components"]["value"] == 0.15
+        assert result["net_margin"]["value"] == 0.15
+        assert result["net_margin_components"]["value"] == 0.12
+
+    def test_profitability_exposes_component_roic(self, monkeypatch):
+        """Stored ROIC and its component-derived companion both surface."""
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        loader.get_financial_ratios_merged.return_value = {
+            "net_income": 1200.0, "total_equity": 8000.0, "total_debt": 2000.0,
+            "roic": 10.0,  # percent-scale in the DB row -> 0.10
+        }
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_fundamental_analysis("BBCA")["profitability"]
+
+        assert result["roic"]["value"] == 0.10          # stored
+        assert result["roic_components"]["value"] == 0.12  # 1200 / 10000
+
+
+class TestValuationMergedRatios:
+    """get_valuation prefers the merged ratio snapshot over the latest row."""
+
+    def test_prefers_merged_over_latest_row(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        # Merged snapshot carries EPS/book-value fields the latest sparse row lacks.
+        loader.get_stock_price.return_value = {"price": 8500.0}
+        loader.get_financial_ratios_merged.return_value = {
+            "eps": 467.0,
+            "total_equity": 60000.0,
+            "net_income": 20000.0,
+            "pe_ratio": 18.2,
+            "pb_ratio": 2.5,
+        }
+        loader.get_financial_ratios.return_value = {"eps": 467.0}
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_valuation("BBCA")
+
+        loader.get_financial_ratios_merged.assert_called_once_with("BBCA")
+        assert result["ticker"] == "BBCA"
+        assert result.get("valuations")
+
+    def test_falls_back_when_merge_helper_absent(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        class _Loader:
+            def get_stock_price(self, ticker):
+                return {"price": 8500.0}
+
+            def get_financial_ratios(self, ticker):
+                return {"eps": 467.0, "total_equity": 60000.0, "net_income": 20000.0}
+
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=_Loader()))
+
+        result = tools.get_valuation("BBCA")
+
+        assert result["ticker"] == "BBCA"
+        assert result.get("valuations")
+
+
+class TestStockPriceChange:
+    """get_stock_price exposes day change when the loader provides it."""
+
+    def test_includes_change_and_change_pct(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import ai.tools as tools
+
+        loader = MagicMock()
+        loader.get_stock_price.return_value = {
+            "ticker": "BBCA", "price": 117, "volume": 1000,
+            "as_of": "2026-09-09", "change": 1.0, "change_pct": 0.86,
+        }
+        monkeypatch.setattr(tools, "get_data_loader", MagicMock(return_value=loader))
+
+        result = tools.get_stock_price("BBCA")
+
+        assert result["change"] == 1.0
+        assert result["change_pct"] == 0.86
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

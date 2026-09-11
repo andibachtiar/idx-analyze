@@ -305,6 +305,40 @@ class DataLoader:
         # Limit results
         return news[:limit]
 
+    def get_macro_news(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent macro/economic news (items with no specific ticker).
+
+        The JSON fallback has no ticker-less concept, so we treat items that carry
+        no symbols (and are not linked to any ticker by title/content) as macro.
+        """
+        data = self._load_json("idx_news.json")
+        if not data:
+            return []
+
+        if isinstance(data, list):
+            news = data
+        elif isinstance(data, dict):
+            news = data.get("news", []) or data.get("articles", []) or list(data.values())
+            if news and isinstance(news[0], dict):
+                news = news
+            else:
+                news = [data]
+        else:
+            news = []
+
+        macro = []
+        for n in news:
+            if not isinstance(n, dict):
+                continue
+            symbols = n.get("symbols", [])
+            if isinstance(symbols, str):
+                symbols = [symbols]
+            # Macro = no symbol list and no ticker field.
+            if symbols or n.get("ticker"):
+                continue
+            macro.append(n)
+        return macro[:limit]
+
     def get_all_tickers(self) -> List[str]:
         """
         Get list of all tracked tickers.

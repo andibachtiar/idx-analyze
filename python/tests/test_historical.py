@@ -655,6 +655,43 @@ class TestConvenienceFunctions:
         assert "revenue" in trends
         assert "net_income" in trends
 
+    def test_create_historical_data_from_db_rows(self):
+        """DB column names (period_end/revenue/net_income) are understood.
+
+        ``get_financial_ratio_history`` returns ``period_end`` and column names
+        like ``revenue``/``net_income`` instead of the IDX JSON keys.
+        """
+        raw_data = [
+            {"fiscal_year": 2023, "fiscal_period": None, "period_end": "2023-12-31",
+             "revenue": 10000.0, "net_income": 1500.0, "eps": 150.0},
+            {"fiscal_year": 2024, "fiscal_period": None, "period_end": "2024-12-31",
+             "revenue": 12000.0, "net_income": 1800.0, "eps": 180.0},
+        ]
+
+        hfd = create_historical_data("BBCA", raw_data)
+
+        assert hfd.get_period_count() == 2
+        growth = hfd.calculate_yoy_growth("revenue")
+        assert growth.value == 0.2  # 12000 / 10000 - 1
+
+    def test_september_period_treated_as_quarterly_by_default(self):
+        """A Sep-30 period with no explicit fiscal_period is not an annual record.
+
+        Sep 30 is ambiguous with a Sep fiscal-year end, but the IDX feed's
+        partial-year rows would otherwise distort the annual YoY comparison.
+        """
+        raw_data = [
+            {"period_end": "2023-12-31", "revenue": 10000.0},
+            {"period_end": "2024-09-30", "revenue": 7000.0},
+            {"period_end": "2025-12-31", "revenue": 12000.0},
+        ]
+
+        hfd = create_historical_data("TEST", raw_data)
+        growth = hfd.calculate_yoy_growth("revenue")
+
+        # Compares 2025 vs 2023 (the Sep row is excluded), not 2025 vs Q3-2024.
+        assert growth.value == 0.2  # 12000 / 10000 - 1
+
 
 # =============================================================================
 # EDGE CASE TESTS

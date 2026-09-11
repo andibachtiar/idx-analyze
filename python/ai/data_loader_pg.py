@@ -11,6 +11,7 @@ import functools
 import hashlib
 import os
 import time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -242,11 +243,15 @@ class PostgreSQLDataLoader:
 
     @_ttl_cache
     def get_financial_ratio_history(self, ticker: str) -> List[Dict[str, Any]]:
-        """Return all stored financial_ratios for a ticker, oldest first.
+        """Return all stored financial_ratios for a ticker, one row per period (oldest first).
 
         Used by the finance fundamentals chart (revenue/earnings/margins over
-        multiple fiscal periods). Numeric values are converted to float so the
-        frontend can plot them directly; missing values stay ``None``.
+        multiple fiscal periods) and by the historical growth engine. Re-runs of
+        the scrapers can leave several rows for the same period carrying different
+        fields, so duplicates are merged (newest non-null wins) — otherwise the
+        history would show a period multiple times and growth between identical
+        points would read as a misleading 0%. Numeric values are converted to
+        float so the frontend can plot them directly; missing values stay ``None``.
         """
         try:
             conn = self._get_connection()
@@ -261,38 +266,56 @@ class PostgreSQLDataLoader:
                            revenue_cagr, earnings_cagr
                     FROM financial_ratios
                     WHERE ticker = %s
-                    ORDER BY period_end ASC NULLS LAST, fiscal_year ASC, fiscal_period ASC NULLS LAST
+                    ORDER BY period_end ASC NULLS LAST, fiscal_year ASC, fiscal_period ASC NULLS LAST, id ASC
                 """, (ticker.upper(),))
                 rows = cur.fetchall()
+
+            # Merge rows that describe the same period so each period appears once.
+            merged: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
+            for r in rows:
+                key = (
+                    r["fiscal_year"],
+                    r["fiscal_period"],
+                    str(r["period_end"]) if r["period_end"] else None,
+                )
+                bucket = merged.setdefault(key, {})
+                for column, value in r.items():
+                    # Later (newer id) non-null values win; gaps stay filled.
+                    if value is not None:
+                        bucket[column] = value
+
+            def as_float(value):
+                return float(value) if value is not None else None
+
             return [
                 {
-                    "fiscal_year": r["fiscal_year"],
-                    "fiscal_period": r["fiscal_period"],
-                    "period_end": str(r["period_end"]) if r["period_end"] else None,
-                    "revenue": float(r["revenue"]) if r["revenue"] is not None else None,
-                    "gross_margin": float(r["gross_margin"]) if r["gross_margin"] is not None else None,
-                    "operating_margin": float(r["operating_margin"]) if r["operating_margin"] is not None else None,
-                    "net_margin": float(r["net_margin"]) if r["net_margin"] is not None else None,
-                    "operating_income": float(r["operating_income"]) if r["operating_income"] is not None else None,
-                    "net_income": float(r["net_income"]) if r["net_income"] is not None else None,
-                    "eps": float(r["eps"]) if r["eps"] is not None else None,
-                    "total_assets": float(r["total_assets"]) if r["total_assets"] is not None else None,
-                    "total_liabilities": float(r["total_liabilities"]) if r["total_liabilities"] is not None else None,
-                    "total_equity": float(r["total_equity"]) if r["total_equity"] is not None else None,
-                    "total_debt": float(r["total_debt"]) if r["total_debt"] is not None else None,
-                    "roe": float(r["roe"]) if r["roe"] is not None else None,
-                    "roa": float(r["roa"]) if r["roa"] is not None else None,
-                    "roic": float(r["roic"]) if r["roic"] is not None else None,
-                    "debt_to_equity": float(r["debt_to_equity"]) if r["debt_to_equity"] is not None else None,
-                    "current_ratio": float(r["current_ratio"]) if r["current_ratio"] is not None else None,
-                    "pe_ratio": float(r["pe_ratio"]) if r["pe_ratio"] is not None else None,
-                    "pb_ratio": float(r["pb_ratio"]) if r["pb_ratio"] is not None else None,
-                    "ev_ebitda": float(r["ev_ebitda"]) if r["ev_ebitda"] is not None else None,
-                    "dividend_yield": float(r["dividend_yield"]) if r["dividend_yield"] is not None else None,
-                    "revenue_cagr": float(r["revenue_cagr"]) if r["revenue_cagr"] is not None else None,
-                    "earnings_cagr": float(r["earnings_cagr"]) if r["earnings_cagr"] is not None else None,
+                    "fiscal_year": r.get("fiscal_year"),
+                    "fiscal_period": r.get("fiscal_period"),
+                    "period_end": str(r["period_end"]) if r.get("period_end") else None,
+                    "revenue": as_float(r.get("revenue")),
+                    "gross_margin": as_float(r.get("gross_margin")),
+                    "operating_margin": as_float(r.get("operating_margin")),
+                    "net_margin": as_float(r.get("net_margin")),
+                    "operating_income": as_float(r.get("operating_income")),
+                    "net_income": as_float(r.get("net_income")),
+                    "eps": as_float(r.get("eps")),
+                    "total_assets": as_float(r.get("total_assets")),
+                    "total_liabilities": as_float(r.get("total_liabilities")),
+                    "total_equity": as_float(r.get("total_equity")),
+                    "total_debt": as_float(r.get("total_debt")),
+                    "roe": as_float(r.get("roe")),
+                    "roa": as_float(r.get("roa")),
+                    "roic": as_float(r.get("roic")),
+                    "debt_to_equity": as_float(r.get("debt_to_equity")),
+                    "current_ratio": as_float(r.get("current_ratio")),
+                    "pe_ratio": as_float(r.get("pe_ratio")),
+                    "pb_ratio": as_float(r.get("pb_ratio")),
+                    "ev_ebitda": as_float(r.get("ev_ebitda")),
+                    "dividend_yield": as_float(r.get("dividend_yield")),
+                    "revenue_cagr": as_float(r.get("revenue_cagr")),
+                    "earnings_cagr": as_float(r.get("earnings_cagr")),
                 }
-                for r in rows
+                for r in merged.values()
             ]
         except Exception as e:
             print(f"Error getting financial ratio history: {e}")
@@ -300,7 +323,7 @@ class PostgreSQLDataLoader:
 
     @_ttl_cache
     def get_stock_price(self, ticker: str) -> Optional[Dict[str, Any]]:
-        """Get latest stock price from database."""
+        """Get latest stock price from database (with day change vs prior close)."""
         try:
             conn = self._get_connection()
             with conn.cursor() as cur:
@@ -309,17 +332,29 @@ class PostgreSQLDataLoader:
                     FROM stock_prices
                     WHERE ticker = %s
                     ORDER BY trading_date DESC
-                    LIMIT 1
+                    LIMIT 2
                 """, (ticker.upper(),))
-                row = cur.fetchone()
-                if row:
-                    return {
-                        "ticker": row["ticker"],
-                        "price": int(row["close_price"]) if row["close_price"] else None,
-                        "volume": int(row["volume"]) if row["volume"] else None,
-                        "as_of": str(row["trading_date"]),
-                    }
-                return None
+                rows = cur.fetchall()
+                if not rows:
+                    return None
+                row = rows[0]
+                close = float(row["close_price"]) if row["close_price"] is not None else None
+                prev_close = (
+                    float(rows[1]["close_price"])
+                    if len(rows) > 1 and rows[1]["close_price"] is not None
+                    else None
+                )
+                change = (close - prev_close) if (close is not None and prev_close is not None) else None
+                change_pct = (change / prev_close * 100) if (change is not None and prev_close) else None
+                return {
+                    "ticker": row["ticker"],
+                    "price": int(row["close_price"]) if row["close_price"] else None,
+                    "volume": int(row["volume"]) if row["volume"] else None,
+                    "as_of": str(row["trading_date"]),
+                    "change": change,
+                    "change_pct": change_pct,
+                    "prev_close": prev_close,
+                }
         except Exception as e:
             print(f"Error getting stock price: {e}")
             return None
@@ -600,6 +635,37 @@ class PostgreSQLDataLoader:
                 ]
         except Exception as e:
             print(f"Error getting news: {e}")
+            return []
+
+    @_ttl_cache
+    def get_macro_news(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent macro/economic news (articles with no ticker)."""
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT ticker, title, content, source, published_at, url, sentiment_score
+                    FROM news_articles
+                    WHERE ticker IS NULL
+                    ORDER BY published_at DESC
+                    LIMIT %s
+                """, (limit,))
+
+                rows = cur.fetchall()
+                return [
+                    {
+                        "ticker": None,
+                        "title": r["title"],
+                        "content": r["content"],
+                        "source": r["source"],
+                        "published_at": str(r["published_at"]) if r["published_at"] else "",
+                        "url": r["url"],
+                        "sentiment": float(r["sentiment_score"]) if r["sentiment_score"] else None,
+                    }
+                    for r in rows
+                ]
+        except Exception as e:
+            print(f"Error getting macro news: {e}")
             return []
 
     @_ttl_cache

@@ -43,55 +43,59 @@ Urutan langkah:
 | `yfinance`            | `scrape_yahoo_financial_fields.py`             | Enrichment: dividend_yield/current_ratio/payout_ratio/CAGR                                                               |
 | `financial_history`   | `backfill_financial_history.py`                | Riwayat multi-tahun dari yfinance (untuk grafik fundamental)                                                             |
 | `news_brave`          | `scrape_brave_news.py --macro`                 | Feed makro/ekonomi/politik via Brave (`ticker=NULL`, filter sumber)                                                      |
-| `news_brave_ticker`   | `scrape_brave_news.py`                         | Berita per-ticker via Brave (favorit/watchlist; `ticker` langsung)                                                       |
 | `news_impacts`        | `enrich_news_impacts.py`                       | Tag dampak sektor/ticker deterministic (B3)                                                                              |
 | `research_candidates` | `generate_research_candidates.py`              | Kandidat riset deterministic dari snapshot (B5) + LLM interpretation                                                     |
 | `research_analyze`    | `auto_analyze.py --source research_candidates` | Analisis menyeluruh (AI) untuk ticker kandidat riset (recency-guarded, capped `RESEARCH_ANALYZE_MAX_TICKERS` default 20) |
 
-> **Sumber berita = Brave saja.** Feed IDX (`scrape_idx_news`) & per-ticker Yahoo
-> (`scrape_company_news`) sudah **tidak lagi** dijalankan pipeline. Berita makro
-> & per-ticker diambil via **Brave Search API** (filter `BRAVE_SOURCES`), per-ticker
-> di-scope ke **favorit/watchlist** (kendali biaya API).
+> **Sumber berita harian = Brave (makro saja).** Feed IDX (`scrape_idx_news`), per-ticker
+> Yahoo (`scrape_company_news`), dan per-ticker Brave **tidak lagi** dijalankan di pipeline.
+> Berita makro diambil via **Brave Search API** (filter `BRAVE_SOURCES`); berita
+> **per-ticker kini di-fetch on-demand** saat user klik “generate analisis menyeluruh”.
 
 #### Sumber Berita (Brave-only)
 
-Semua berita kini diambil dari **Brave News Search API** lewat dua mode:
+Pipeline harian hanya mengambil **berita makro** via satu mode:
 
-| Mode           | Step                            | Query                                                                                        | Ticker di tabel                                         |
-| -------------- | ------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| **Makro**      | `news_brave` (`--macro`)        | `BRAVE_MACRO_QUERIES` (ekonomi/politik umum, mis. "ekonomi indonesia, ihsg, harga batubara") | `NULL` → dipetakan ke sektor/ticker oleh `news_impacts` |
-| **Per-ticker** | `news_brave_ticker` (tanpa arg) | `{ticker} saham berita`, satu per **favorit/watchlist**                                      | langsung diisi dari ticker yang di-query                |
+| Mode      | Step                     | Query                                                                                        | Ticker di tabel                                         |
+| --------- | ------------------------ | -------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Makro** | `news_brave` (`--macro`) | `BRAVE_MACRO_QUERIES` (ekonomi/politik umum, mis. "ekonomi indonesia, ihsg, harga batubara") | `NULL` → dipetakan ke sektor/ticker oleh `news_impacts` |
 
 **Aturan scope:**
 
-- `news_brave_ticker` **hanya favorit/watchlist** — tanpa `--ticker`, ia membaca
-  `store.get_favorites()`. Daftar favorit dikontrol dari UI (kartu favorit / watchlist);
-  pipeline otomatis mengikuti daftar itu.
-- Jika **tidak ada favorit**, step hanya menampilkan pesan dan `return 0` (tidak
-  menggagalkan pipeline) — aman untuk penjadwalan otomatis.
-- Bila ingin menjalankan per-ticker untuk ticker tertentu di luar favorit, jalankan
-  manual: `uv run python scrape_brave_news.py --ticker BBCA --ticker BBRI`.
+- `news_brave` `--macro` hanya menjalankan `BRAVE_MACRO_QUERIES` (bukan per-ticker),
+  dan hasilnya disimpan dengan `ticker=NULL`. Pelink-an ke sektor/emiten dilakukan
+  **deterministik** oleh `enrich_news_impacts.py` (B3).
+- **Berita per-ticker tidak lagi** di-scrape harian untuk favorit/watchlist. Ia di-fetch
+  **on-demand** saat analisis menyeluruh berjalan (lihat `_fetch_fresh_ticker_news` di
+  `api/main.py`), lalu disimpan ke `news_articles` dan dipakai sebagai bahan analisa.
+- **Guard kesegaran:** scrape per-ticker saat analisis menyeluruh hanya terjadi bila
+  **belum ada berita terbaru** untuk ticker itu (berita terbaru lebih tua dari
+  `NEWS_FRESHNESS_HOURS`, default 24 jam). Jika sudah ada berita segar, API Brave tidak
+  dipanggil dan analisis memakai data yang ada — menghemat kuota API.
+- Setelah scrape on-demand berhasil, cache baca data-loader dibersihkan agar analisis
+  langsung memakai baris berita yang baru disimpan.
+- Bila ingin menjalankan per-ticker secara manual kapan saja:
+  `uv run python scrape_brave_news.py --ticker BBCA --ticker BBRI`.
 
-**Kendali biaya/rate-limit:** per-ticker = 1 request API per ticker favorit per
-siklus. Makro = 1 request per query `BRAVE_MACRO_QUERIES`. Sumber difilter oleh
-`BRAVE_SOURCES` (allowlist domain/publisher); hasil di luar allowlist dibuang
-(daftar publisher yang terbuang ditampilkan agar bisa ditambahkan).
+**Kendali biaya/rate-limit:** pipeline harian = 1 request per query `BRAVE_MACRO_QUERIES`
+(biasanya ~5–10), **bukan** 973 ticker. Berita per-ticker di-fetch hanya saat diminta
+(user klik analisis) = 1 request per ticker yang dianalisa. Sumber difilter oleh
+`BRAVE_SOURCES` (allowlist domain/publisher); hasil di luar allowlist dibuang.
 
 **Ticker per artikel:**
 
-- Per-ticker → `ticker` **eksplisit** dari query (paling andal, tanpa tebakan).
 - Makro → `ticker=NULL`; pelink-an ke sektor/ticker dilakukan **deterministik** oleh
   `enrich_news_impacts.py` (B3, lexicon keyword → sektor/direksi/confidence), lalu
   `news_impacts` → `research_candidates` (B5).
+- Per-ticker (on-demand) → `ticker` **eksplisit** dari query (paling andal, tanpa tebakan);
+  disimpan saat analisis menyeluruh berjalan.
 
 ### Alur harian: scraping → interpretasi → kandidat riset
 
 ```
-news_brave (makro, ticker=NULL) ─┐
-news_brave_ticker (per-ticker/orang favorit) ─┤→ news_impacts (tag sektor/direksi) → research_candidates
-                                            │                                       (sector + affected_tickers)
-                                            │
-                                            └─ LLM interpretasi bukti yang sama (opsional --use-llm)
+news_brave (makro, ticker=NULL) ─→ news_impacts (tag sektor/direksi) → research_candidates
+                                  (sector + affected_tickers)
+                                └─ LLM interpretasi bukti yang sama (opsional --use-llm)
 ```
 
 Kandidat **tidak pernah dikarang LLM** (Opsi A): hanya `sector` + `affected_tickers`
@@ -190,11 +194,11 @@ Tiap step punya **cadence** (frekuensi refresh) yang sesuai karakter datanya.
 Scheduler menjalankan step yang **jatuh tempo** (dilacak via
 `data/scheduler_cadence_state.json`), bukan selalu `--all`:
 
-| Cadence   | Step yang dijalankan                                                                                               | Alasan                            |
-| --------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| `daily`   | `companies`, `prices`, `financial_ratio`, `news_brave`, `news_brave_ticker`, `news_impacts`, `research_candidates` | Berita/harga/rasio berubah harian |
-| `weekly`  | `yfinance`                                                                                                         | Rate-limited & mahal (~30 mnt)    |
-| `monthly` | `financial_history`                                                                                                | Backfill multi-tahun, berat       |
+| Cadence   | Step yang dijalankan                                                                          | Alasan                          |
+| --------- | --------------------------------------------------------------------------------------------- | ------------------------------- |
+| `daily`   | `companies`, `prices`, `financial_ratio`, `news_brave`, `news_impacts`, `research_candidates` | Harga/rasio/berita makro harian |
+| `weekly`  | `yfinance`                                                                                    | Rate-limited & mahal (~30 mnt)  |
+| `monthly` | `financial_history`                                                                           | Backfill multi-tahun, berat     |
 
 Jalankan manual per cadence:
 
